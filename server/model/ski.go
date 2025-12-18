@@ -1,9 +1,9 @@
 package model
 
 type Ski struct {
-	Ski string `form:"ski" json:"ski" xml:"ski" binding:"required"`
+	Ski string `json:"ski"`
 }
 
 type SkiList struct {
-	Ski []string `form:"ski" json:"ski" xml:"ski" binding:"required"`
+	Ski []string `json:"ski"`
 }

@@ -20,6 +20,9 @@ import (
 	cert "github.com/enbility/ship-go/cert"
 	spine_api "github.com/enbility/spine-go/api"
 	spine_model "github.com/enbility/spine-go/model"
+
+	model "github.com/fran1215/eebus-go-rest/model"
+
 )
 
 type Runtime struct {
@@ -180,6 +183,10 @@ func (r *Runtime) GetLPP() (float64, error) {
 		return 0, err
 	}
 	return limit.Value, nil
+}
+
+func (r *Runtime) MDNSDiscovery(timeout time.Duration) ([]Service, error) {
+
 }
 
 func (r *Runtime) RemoteSKIConnected(service api.ServiceInterface, ski string) {
