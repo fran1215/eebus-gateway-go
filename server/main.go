@@ -13,6 +13,7 @@ import (
 	signal "os/signal"
 	syscall "syscall"
 	time "time"
+	"github.com/gin-contrib/cors"
 )
 
 func waitForSignal(srv *http.Server) {
@@ -67,19 +68,30 @@ func main() {
 	defer runtime.Stop()
 
 	router := gin.Default()
-	router.GET("/ski/local", func(c *gin.Context) {
+
+	// Allow all origins for development
+	router.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:4321"}, // your Astro dev server
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
+
+	router.GET("/api/ski/local", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"ski": runtime.GetLocalSKI(),
 		})
 	})
 
-	router.GET("/ski/remotes", func(c *gin.Context) {
+	router.GET("/api/ski/remotes", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"remotes": runtime.GetRemoteSKIs(),
 		})
 	})
 
-	router.POST("/ski/remote", func(c *gin.Context) {
+	router.POST("/api/ski/remote", func(c *gin.Context) {
 		var remote model.Ski
 		if err := c.ShouldBindJSON(&remote); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})
@@ -88,7 +100,7 @@ func main() {
 		}
 	})
 
-	router.POST("/ski/remotes", func(c *gin.Context) {
+	router.POST("/api/ski/remotes", func(c *gin.Context) {
 		var remotes model.SkiList
 		if err := c.ShouldBindJSON(&remotes); err != nil || len(remotes.Ski) == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})
@@ -99,7 +111,7 @@ func main() {
 		}
 	})
 
-	router.GET("/lpp", func(c *gin.Context) {
+	router.GET("/api/lpp", func(c *gin.Context) {
 		lpp, err := runtime.GetLPP()
 		if err != nil {
 			c.JSON(http.StatusTooEarly, gin.H{
@@ -112,7 +124,7 @@ func main() {
 		}
 	})
 
-	router.GET("/lpc", func(c *gin.Context) {
+	router.GET("/api/lpc", func(c *gin.Context) {
 		lpc, err := runtime.GetLPC()
 		if err != nil {
 			c.JSON(http.StatusTooEarly, gin.H{
@@ -125,11 +137,21 @@ func main() {
 		}
 	})
 
-	router.GET("/log", func(c *gin.Context) {
+	router.GET("/api/log", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"level": runtime.GetLogLevel()})
 	})
 
-	router.POST("/log", func(c *gin.Context) {
+	router.GET("/api/mdns/discovery", func(c *gin.Context) {
+		results, err := runtime.MDNSDiscovery(2 * time.Second)
+		
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		} else {
+			c.JSON(http.StatusOK, results)
+		}
+	})
+
+	router.POST("/api/log", func(c *gin.Context) {
 		var level model.LogLevel
 		if err := c.ShouldBindJSON(&level); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})

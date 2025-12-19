@@ -1,9 +1,11 @@
 package eebus
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	api "github.com/enbility/eebus-go/api"
@@ -21,8 +23,9 @@ import (
 	spine_api "github.com/enbility/spine-go/api"
 	spine_model "github.com/enbility/spine-go/model"
 
-	model "github.com/fran1215/eebus-go-rest/model"
+	"github.com/grandcat/zeroconf"
 
+	model "github.com/tumbleowlee/eebus-go-rest/server/model"
 )
 
 type Runtime struct {
@@ -185,8 +188,104 @@ func (r *Runtime) GetLPP() (float64, error) {
 	return limit.Value, nil
 }
 
-func (r *Runtime) MDNSDiscovery(timeout time.Duration) ([]Service, error) {
+func (r *Runtime) MDNSDiscovery(timeout time.Duration) ([]model.Device, error) {
+	resolver, err := zeroconf.NewResolver(nil)
+	if err != nil {
+		return nil, err
+	}
 
+	entries := make(chan *zeroconf.ServiceEntry)
+	foundServices := []model.Service{}
+
+	results := []model.Device{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	go func() {
+		for entry := range entries {
+			service := model.Service{
+				Instance: entry.Instance,
+				HostName: entry.HostName,
+				Port:     entry.Port,
+				Text:     entry.Text,
+			}
+
+			for _, ip := range entry.AddrIPv4 {
+				service.IPs = append(service.IPs, ip.String())
+			}
+
+			for _, ip := range entry.AddrIPv6 {
+				service.IPs = append(service.IPs, ip.String())
+			}
+
+			foundServices = append(foundServices, service)
+		}
+	}()
+
+	if err := resolver.Browse(ctx, "_ship._tcp", "local.", entries); err != nil {
+		return nil, err
+	}
+
+	<-ctx.Done()
+
+	fmt.Println("Discovered services: ", len(foundServices))
+
+	for _, service := range foundServices {
+		fmt.Printf("- %s (%s:%d) | TEXT: %s\n", service.Instance, service.HostName, service.Port, service.Text)
+
+		generalInfo := model.GeneralInfo{}
+		shipInfo := model.SHIPInfo{}
+		ski := ""
+
+		shipInfo.HostAddress = service.IPs[0]
+		shipInfo.Port = service.Port
+		shipInfo.InstanceName = strings.ReplaceAll(service.Instance, "\\", "")
+
+		for _, text := range service.Text {
+			parts := strings.SplitN(text, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := parts[0]
+			value := parts[1]
+			switch key {
+			case "ShipId":
+				shipInfo.ShipId = value
+			case "DeviceName":
+				generalInfo.DeviceName = value
+			case "Brand":
+				generalInfo.Brand = value
+			case "Vendor":
+				generalInfo.Vendor = value
+			case "SerialNumber":
+				generalInfo.SerialNumber = value
+			case "Model":
+				generalInfo.Model = value
+			case "Type":
+				generalInfo.Type = value
+			case "SpineDeviceAddress":
+				generalInfo.SpineDeviceAddress = value
+			case "ski":
+				ski = value
+			}
+		}
+
+		// Ignore own device (skip if SKI matches local_ski)
+		if ski == r.local_ski {
+			continue
+		}
+
+		device := model.Device{
+			GeneralInfo: generalInfo,
+			SHIPInfo:    shipInfo,
+			Ski:         ski,
+		}
+
+		results = append(results, device)
+	}
+
+	return results, nil
 }
 
 func (r *Runtime) RemoteSKIConnected(service api.ServiceInterface, ski string) {
