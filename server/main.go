@@ -31,7 +31,7 @@ type Hub struct {
 	mu                sync.RWMutex
 	discoveredDevices map[string]model.Device // Track discovered devices by SKI
 	devicesMu         sync.RWMutex
-	simulationDevices map[string]bool         // Track which devices are in simulation
+	simulationDevices map[string]bool // Track which devices are in simulation
 	simulationMu      sync.RWMutex
 }
 
@@ -215,7 +215,7 @@ func main() {
 		hub.simulationMu.RLock()
 		isInSimulation := hub.simulationDevices[ski]
 		hub.simulationMu.RUnlock()
-		
+
 		if isInSimulation {
 			hub.sendMessage("mpc_update", gin.H{
 				"ski":     ski,
