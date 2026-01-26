@@ -11,13 +11,9 @@ import (
 	api "github.com/enbility/eebus-go/api"
 	service "github.com/enbility/eebus-go/service"
 	usecase_api "github.com/enbility/eebus-go/usecases/api"
-	usecase_vabd "github.com/enbility/eebus-go/usecases/cem/vabd"
-	usecase_vapd "github.com/enbility/eebus-go/usecases/cem/vapd"
 	usecase_lpc "github.com/enbility/eebus-go/usecases/cs/lpc"
-	usecase_lpp "github.com/enbility/eebus-go/usecases/cs/lpp"
 	usecase_eg_lpc "github.com/enbility/eebus-go/usecases/eg/lpc"
-	usecase_eg_lpp "github.com/enbility/eebus-go/usecases/eg/lpp"
-	usecase_mgcp "github.com/enbility/eebus-go/usecases/ma/mgcp"
+	usecase_ma_mpc "github.com/enbility/eebus-go/usecases/ma/mpc"
 	ship_api "github.com/enbility/ship-go/api"
 	cert "github.com/enbility/ship-go/cert"
 	spine_api "github.com/enbility/spine-go/api"
@@ -28,6 +24,8 @@ import (
 	model "github.com/tumbleowlee/eebus-go-rest/server/model"
 )
 
+type MPCEventCallback func(ski string, power float64, energy float64, current float64)
+
 type Runtime struct {
 	loglevel int
 
@@ -35,13 +33,13 @@ type Runtime struct {
 	local_ski  string
 	remote_ski []string
 
-	cs_lpc   usecase_api.CsLPCInterface
-	cs_lpp   usecase_api.CsLPPInterface
-	eg_lpc   usecase_api.EgLPCInterface
-	eg_lpp   usecase_api.EgLPPInterface
-	ma_mgcp  usecase_api.MaMGCPInterface
-	cem_vapd usecase_api.CemVAPDInterface
-	cem_vabd usecase_api.CemVABDInterface
+	cs_lpc usecase_api.CsLPCInterface
+	cs_lpp usecase_api.CsLPPInterface
+	eg_lpc usecase_api.EgLPCInterface
+	eg_lpp usecase_api.EgLPPInterface
+	ma_mpc usecase_api.MaMPCInterface
+
+	mpcCallback MPCEventCallback
 }
 
 func NewRuntime(config Config) (*Runtime, error) {
@@ -67,6 +65,7 @@ func NewRuntime(config Config) (*Runtime, error) {
 	}
 
 	var runtime Runtime
+	runtime.loglevel = 2 // Set default log level: 0=Error only, 1=Info, 2=Debug, 3=Trace
 	runtime.service = service.NewService(configuration, &runtime)
 	runtime.service.SetLogging(&runtime)
 	runtime.local_ski = localSki
@@ -78,40 +77,23 @@ func NewRuntime(config Config) (*Runtime, error) {
 
 	localEntity := runtime.service.LocalDevice().EntityForType(spine_model.EntityTypeTypeCEM)
 
-	runtime.cs_lpc = usecase_lpc.NewLPC(localEntity, runtime.OnLPCEvent)
-	runtime.service.AddUseCase(runtime.cs_lpc)
-	runtime.cs_lpp = usecase_lpp.NewLPP(localEntity, runtime.OnLPPEvent)
-	runtime.service.AddUseCase(runtime.cs_lpp)
 	runtime.eg_lpc = usecase_eg_lpc.NewLPC(localEntity, nil)
 	runtime.service.AddUseCase(runtime.eg_lpc)
-	runtime.eg_lpp = usecase_eg_lpp.NewLPP(localEntity, nil)
-	runtime.service.AddUseCase(runtime.eg_lpp)
-	runtime.ma_mgcp = usecase_mgcp.NewMGCP(localEntity, nil)
-	runtime.service.AddUseCase(runtime.ma_mgcp)
-	runtime.cem_vabd = usecase_vabd.NewVABD(localEntity, nil)
-	runtime.service.AddUseCase(runtime.cem_vabd)
-	runtime.cem_vapd = usecase_vapd.NewVAPD(localEntity, nil)
-	runtime.service.AddUseCase(runtime.cem_vapd)
+	runtime.ma_mpc = usecase_ma_mpc.NewMPC(localEntity, runtime.OnMPCEvent)
+	runtime.service.AddUseCase(runtime.ma_mpc)
 
-	runtime.cs_lpc.SetConsumptionNominalMax(config.ConsumptionNominalMax)
-	runtime.cs_lpc.SetConsumptionLimit(usecase_api.LoadLimit{
-		Value:        config.ConsumptionLimit,
-		IsChangeable: true,
-		IsActive:     false,
-	})
-	runtime.cs_lpc.SetFailsafeConsumptionActivePowerLimit(config.ConsumptionFailsafePowerLimit, true)
-	runtime.cs_lpc.SetFailsafeDurationMinimum(config.ConsumptionFailsafeDuration, true)
-
-	runtime.cs_lpp.SetProductionNominalMax(config.ProductionNominalMax)
-	runtime.cs_lpp.SetProductionLimit(usecase_api.LoadLimit{
-		Value:        config.ProductionLimit,
-		IsChangeable: true,
-		IsActive:     false,
-	})
-	runtime.cs_lpp.SetFailsafeProductionActivePowerLimit(config.ProductionFailsafePowerLimit, true)
-	runtime.cs_lpp.SetFailsafeDurationMinimum(config.ProductionFailsafeDuration, true)
+	/* 	runtime.cs_lpp.SetProductionNominalMax(config.ProductionNominalMax)
+	   	runtime.cs_lpp.SetProductionLimit(usecase_api.LoadLimit{
+	   		Value:        config.ProductionLimit,
+	   		IsChangeable: true,
+	   		IsActive:     false,
+	   	})
+	   	runtime.cs_lpp.SetFailsafeProductionActivePowerLimit(config.ProductionFailsafePowerLimit, true)
+	   	runtime.cs_lpp.SetFailsafeDurationMinimum(config.ProductionFailsafeDuration, true) */
 
 	runtime.service.Start()
+
+	runtime.service.SetAutoAccept(true)
 
 	return &runtime, nil
 }
@@ -137,19 +119,31 @@ func (r *Runtime) GetRemoteSKIs() []string {
 }
 
 func (r *Runtime) ServicePairingDetailUpdate(ski string, detail *ship_api.ConnectionStateDetail) {
-	for _, remoteSki := range r.remote_ski {
-		if ski == remoteSki && detail.State() == ship_api.ConnectionStateRemoteDeniedTrust {
-			fmt.Println("The remote service denied trust. Exiting.")
-			r.service.CancelPairingWithSKI(ski)
-			r.service.UnregisterRemoteSKI(ski)
-			r.service.Shutdown()
-		}
+	r.Infof("Pairing detail update for SKI %s: State=%v", ski, detail.State())
+
+	switch detail.State() {
+	case ship_api.ConnectionStateRemoteDeniedTrust:
+		r.Infof("Remote service %s denied trust", ski)
+		r.service.CancelPairingWithSKI(ski)
+		r.service.UnregisterRemoteSKI(ski)
+
+	case ship_api.ConnectionStateReceivedPairingRequest:
+		r.Infof("Received pairing request from %s, approving...", ski)
+		// r.service.AllowWaitingForTrust()
+
+	case ship_api.ConnectionStateCompleted:
+		r.Infof("Connection with %s completed successfully", ski)
+
+	case ship_api.ConnectionStateError:
+		r.Infof("Connection error with %s", ski)
 	}
 }
 
 func (r *Runtime) RegisterSKI(ski string) {
+	r.Infof("Registering remote SKI: %s", ski)
 	r.remote_ski = append(r.remote_ski, ski)
 	r.service.RegisterRemoteSKI(ski)
+	r.Infof("Remote SKIs registered: %v", r.remote_ski)
 }
 
 func (r *Runtime) OnLPCEvent(ski string, device spine_api.DeviceRemoteInterface, entity spine_api.EntityRemoteInterface, event api.EventType) {
@@ -186,6 +180,51 @@ func (r *Runtime) GetLPP() (float64, error) {
 		return 0, err
 	}
 	return limit.Value, nil
+}
+
+func (r *Runtime) OnMPCEvent(ski string, device spine_api.DeviceRemoteInterface, entity spine_api.EntityRemoteInterface, event api.EventType) {
+	fmt.Printf("DEBUG - MPC Event received from SKI: %s, Event: %v \n", ski, event)
+
+	// When power data is updated, trigger callback
+	if r.mpcCallback != nil {
+		power, err := r.ma_mpc.Power(entity)
+		if err != nil {
+			r.Debugf("Failed to get power: %v", err)
+		}
+		energy, err := r.ma_mpc.EnergyConsumed(entity)
+		if err != nil {
+			r.Debugf("Failed to get energy: %v", err)
+		}
+		currentPerPhase, err := r.ma_mpc.CurrentPerPhase(entity)
+		if err != nil {
+			r.Debugf("Failed to get current: %v", err)
+		}
+
+		// Calculate total current (sum of all phases)
+		var totalCurrent float64
+		for _, current := range currentPerPhase {
+			totalCurrent += current
+		}
+
+		fmt.Printf("DEBUG - Calling MPC callback with: Power=%.2f, Energy=%.2f, Current=%.2f \n", power, energy, totalCurrent)
+		r.mpcCallback(ski, power, energy, totalCurrent)
+	} else {
+		r.Debugf("MPC callback is nil")
+	}
+}
+
+func (r *Runtime) SetMPCCallback(callback MPCEventCallback) {
+	r.mpcCallback = callback
+}
+
+func (r *Runtime) StartSimulation(devices []model.Device) error {
+	for _, device := range devices {
+		if device.Ski == r.local_ski {
+			continue
+		}
+		r.RegisterSKI(device.Ski)
+	}
+	return nil
 }
 
 func (r *Runtime) MDNSDiscovery(timeout time.Duration) ([]model.Device, error) {
@@ -229,10 +268,10 @@ func (r *Runtime) MDNSDiscovery(timeout time.Duration) ([]model.Device, error) {
 
 	<-ctx.Done()
 
-	fmt.Println("Discovered services: ", len(foundServices))
+	// fmt.Println("Discovered services: ", len(foundServices))
 
 	for _, service := range foundServices {
-		fmt.Printf("- %s (%s:%d) | TEXT: %s\n", service.Instance, service.HostName, service.Port, service.Text)
+		// fmt.Printf("- %s (%s:%d) | TEXT: %s\n", service.Instance, service.HostName, service.Port, service.Text)
 
 		generalInfo := model.GeneralInfo{}
 		shipInfo := model.SHIPInfo{}
@@ -250,19 +289,19 @@ func (r *Runtime) MDNSDiscovery(timeout time.Duration) ([]model.Device, error) {
 			key := parts[0]
 			value := parts[1]
 			switch key {
-			case "ShipId":
+			case "id":
 				shipInfo.ShipId = value
 			case "DeviceName":
 				generalInfo.DeviceName = value
-			case "Brand":
+			case "brand":
 				generalInfo.Brand = value
-			case "Vendor":
+			case "vendor":
 				generalInfo.Vendor = value
-			case "SerialNumber":
+			case "serial":
 				generalInfo.SerialNumber = value
-			case "Model":
+			case "model":
 				generalInfo.Model = value
-			case "Type":
+			case "type":
 				generalInfo.Type = value
 			case "SpineDeviceAddress":
 				generalInfo.SpineDeviceAddress = value
@@ -289,15 +328,19 @@ func (r *Runtime) MDNSDiscovery(timeout time.Duration) ([]model.Device, error) {
 }
 
 func (r *Runtime) RemoteSKIConnected(service api.ServiceInterface, ski string) {
+	r.Infof("Remote SKI connected: %s", ski)
 }
 
 func (r *Runtime) RemoteSKIDisconnected(service api.ServiceInterface, ski string) {
+	r.Infof("Remote SKI disconnected: %s", ski)
 }
 
-func (r *Runtime) ServiceShipIDUpdate(ski string, shipdID string) {
+func (r *Runtime) ServiceShipIDUpdate(ski string, shipID string) {
+	r.Debugf("SHIP ID updated for SKI %s: %s", ski, shipID)
 }
 
 func (r *Runtime) VisibleRemoteServicesUpdated(service api.ServiceInterface, entries []ship_api.RemoteService) {
+	r.Debugf("Visible remote services updated: %d entries", len(entries))
 }
 func (r *Runtime) Trace(args ...any) {
 	if r.loglevel > 2 {
