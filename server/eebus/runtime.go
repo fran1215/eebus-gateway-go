@@ -24,7 +24,7 @@ import (
 	model "github.com/tumbleowlee/eebus-go-rest/server/model"
 )
 
-type MPCEventCallback func(ski string, power float64, energy float64, current float64)
+type MPCEventCallback func(ski string, power float64, energy float64, current float64, voltage float64, frequency float64)
 
 type Runtime struct {
 	loglevel int
@@ -65,7 +65,7 @@ func NewRuntime(config Config) (*Runtime, error) {
 	}
 
 	var runtime Runtime
-	runtime.loglevel = 2 // Set default log level: 0=Error only, 1=Info, 2=Debug, 3=Trace
+	runtime.loglevel = 1 // Set default log level: 0=Error only, 1=Info, 2=Debug, 3=Trace
 	runtime.service = service.NewService(configuration, &runtime)
 	runtime.service.SetLogging(&runtime)
 	runtime.local_ski = localSki
@@ -199,6 +199,14 @@ func (r *Runtime) OnMPCEvent(ski string, device spine_api.DeviceRemoteInterface,
 		if err != nil {
 			r.Debugf("Failed to get current: %v", err)
 		}
+		voltage, err := r.ma_mpc.VoltagePerPhase(entity)
+		if err != nil {
+			r.Debugf("Failed to get voltage: %v", err)
+		}
+		frequency, err := r.ma_mpc.Frequency(entity)
+		if err != nil {
+			r.Debugf("Failed to get frequency: %v", err)
+		}
 
 		// Calculate total current (sum of all phases)
 		var totalCurrent float64
@@ -206,8 +214,14 @@ func (r *Runtime) OnMPCEvent(ski string, device spine_api.DeviceRemoteInterface,
 			totalCurrent += current
 		}
 
-		fmt.Printf("DEBUG - Calling MPC callback with: Power=%.2f, Energy=%.2f, Current=%.2f \n", power, energy, totalCurrent)
-		r.mpcCallback(ski, power, energy, totalCurrent)
+		var totalVoltage float64
+		for _, volt := range voltage {
+			totalVoltage += volt
+		}
+		var avgVoltage float64 = totalVoltage / float64(len(voltage))
+
+		fmt.Printf("DEBUG - Calling MPC callback with: Power=%.2f, Energy=%.2f, Current=%.2f, Voltage=%.2f, Frequency=%.2f \n", power, energy, totalCurrent, avgVoltage, frequency)
+		r.mpcCallback(ski, power, energy, totalCurrent, avgVoltage, frequency)
 	} else {
 		r.Debugf("MPC callback is nil")
 	}
@@ -217,13 +231,21 @@ func (r *Runtime) SetMPCCallback(callback MPCEventCallback) {
 	r.mpcCallback = callback
 }
 
-func (r *Runtime) StartSimulation(devices []model.Device) error {
-	for _, device := range devices {
-		if device.Ski == r.local_ski {
+func (r *Runtime) StartSimulation(skis []string) error {
+	for _, ski := range skis {
+		if ski == r.local_ski {
 			continue
 		}
-		r.RegisterSKI(device.Ski)
+		r.RegisterSKI(ski)
 	}
+	return nil
+}
+
+func (r *Runtime) StopSimulation() error {
+	for _, ski := range r.remote_ski {
+		r.service.UnregisterRemoteSKI(ski)
+	}
+	r.remote_ski = []string{}
 	return nil
 }
 

@@ -8,6 +8,7 @@ import (
 	http "net/http"
 	os "os"
 	signal "os/signal"
+	slices "slices"
 	strconv "strconv"
 	"sync"
 	syscall "syscall"
@@ -31,8 +32,9 @@ type Hub struct {
 	mu                sync.RWMutex
 	discoveredDevices map[string]model.Device // Track discovered devices by SKI
 	devicesMu         sync.RWMutex
-	simulationDevices map[string]bool // Track which devices are in simulation
+	simulationDevices []string // Track which devices are in simulation
 	simulationMu      sync.RWMutex
+	simulationRunning bool
 }
 
 func newHub() *Hub {
@@ -42,7 +44,7 @@ func newHub() *Hub {
 		register:          make(chan *websocket.Conn),
 		unregister:        make(chan *websocket.Conn),
 		discoveredDevices: make(map[string]model.Device),
-		simulationDevices: make(map[string]bool),
+		simulationDevices: make([]string, 0),
 	}
 }
 
@@ -210,20 +212,23 @@ func main() {
 	go hub.run()
 
 	// Register MPC event callback to broadcast power updates
-	runtime.SetMPCCallback(func(ski string, power float64, energy float64, current float64) {
+	runtime.SetMPCCallback(func(ski string, power float64, energy float64, current float64, voltage float64, frequency float64) {
 		// Only broadcast MPC updates for devices in the simulation
 		hub.simulationMu.RLock()
-		isInSimulation := hub.simulationDevices[ski]
 		hub.simulationMu.RUnlock()
 
-		if isInSimulation {
+		fmt.Printf("DEBUG: Simulation Running: %v, Devices: %v\n", hub.simulationRunning, hub.simulationDevices)
+
+		if hub.simulationRunning && slices.Contains(hub.simulationDevices, ski) {
 			hub.sendMessage("mpc_update", gin.H{
 				"ski":     ski,
 				"power":   power,
 				"energy":  energy,
 				"current": current,
+				"voltage": voltage,
+				"frequency": frequency,
 			})
-			log.Printf("MPC Update from %s: Power=%.2f W, Energy=%.2f Wh, Current=%.2f A", ski, power, energy, current)
+			log.Printf("MPC Update from %s: Power=%.2f W, Energy=%.2f Wh, Current=%.2f A, Voltage=%.2f V, Frequency=%.2f Hz", ski, power, energy, current, voltage, frequency)
 		} else {
 			log.Printf("MPC Update from %s ignored (not in simulation)", ski)
 		}
@@ -386,47 +391,101 @@ func main() {
 
 				case "start_simulation":
 					data, _ := msg["data"].(map[string]interface{})
-					if devicesData, ok := data["devices"]; ok {
-						// Convert to JSON and back to properly unmarshal
-						jsonData, err := json.Marshal(devicesData)
-						if err != nil {
-							hub.sendToClient(conn, "error", gin.H{"error": "Invalid devices data"})
-							break
-						}
+					if !hub.simulationRunning {
+						if devicesData, ok := data["devices"]; ok {
+							// Convert to JSON and back to properly unmarshal
+							jsonData, err := json.Marshal(devicesData)
+							if err != nil {
+								hub.sendToClient(conn, "error", gin.H{"error": "Invalid devices data"})
+								break
+							}
 
-						fmt.Println(string(jsonData))
+							fmt.Println(string(jsonData))
 
-						var devices []model.Device
-						if err := json.Unmarshal(jsonData, &devices); err != nil {
-							hub.sendToClient(conn, "error", gin.H{"error": "Invalid devices format"})
-							break
-						}
+							var devices []string
+							if err := json.Unmarshal(jsonData, &devices); err != nil {
+								hub.sendToClient(conn, "error", gin.H{"error": "Invalid devices format"})
+								break
+							}
 
-						// Update the simulation devices list
-						hub.simulationMu.Lock()
-						hub.simulationDevices = make(map[string]bool)
-						for _, device := range devices {
-							hub.simulationDevices[device.Ski] = true
-							log.Printf("Device %s added to simulation", device.Ski)
-						}
-						hub.simulationMu.Unlock()
+							// Update the simulation devices list
+							hub.simulationMu.Lock()
+							hub.simulationDevices = make([]string, 0)
+							for _, device := range devices {
+								hub.simulationDevices = append(hub.simulationDevices, device)
+								log.Printf("Device %s added to simulation", device)
+							}
+							hub.simulationMu.Unlock()
 
-						err = runtime.StartSimulation(devices)
-						if err != nil {
-							hub.sendToClient(conn, "error", gin.H{"error": err.Error()})
-							hub.sendMessage("simulation_error", gin.H{"error": err.Error()})
+							err = runtime.StartSimulation(devices)
+							if err != nil {
+								hub.sendToClient(conn, "error", gin.H{"error": err.Error()})
+								hub.sendMessage("simulation_error", gin.H{"error": err.Error()})
+							} else {
+								hub.simulationRunning = true
+								hub.sendToClient(conn, "simulation_started", gin.H{
+									"status":  "Simulation started",
+									"devices": devices,
+								})
+								hub.sendMessage("simulation_started", gin.H{
+									"status":  "Simulation started",
+									"devices": devices,
+								})
+							}
 						} else {
-							hub.sendToClient(conn, "simulation_started", gin.H{
-								"status":  "Simulation started",
-								"devices": devices,
-							})
-							hub.sendMessage("simulation_started", gin.H{
-								"status":  "Simulation started",
-								"devices": devices,
-							})
+							hub.sendToClient(conn, "error", gin.H{"error": "Missing devices data"})
 						}
+					}
+
+				case "stop_simulation":
+					err := runtime.StopSimulation()
+					if err != nil {
+						hub.sendToClient(conn, "error", gin.H{"error": err.Error()})
+						hub.sendMessage("simulation_error", gin.H{"error": err.Error()})
+					}
+					hub.simulationRunning = false
+					hub.simulationMu.Lock()
+					hub.simulationDevices = make([]string, 0)
+					hub.simulationMu.Unlock()
+					hub.sendToClient(conn, "simulation_stopped", gin.H{"status": "Simulation stopped"})
+					hub.sendMessage("simulation_stopped", gin.H{"status": "Simulation stopped"})
+
+				case "add_device":
+					data, _ := msg["data"].(map[string]interface{})
+
+					if ski, ok := data["ski"].(string); ok {
+						if hub.simulationRunning {
+							hub.simulationMu.Lock()
+							if !slices.Contains(hub.simulationDevices, ski) {
+								hub.simulationDevices = append(hub.simulationDevices, ski)
+								log.Printf("Device %s added to running simulation", ski)
+							}
+							hub.simulationMu.Unlock()
+						}
+						hub.sendToClient(conn, "device_added", gin.H{"ski": ski})
 					} else {
-						hub.sendToClient(conn, "error", gin.H{"error": "Missing devices data"})
+						hub.sendToClient(conn, "error", gin.H{"error": "Missing SKI data"})
+					}
+
+				case "remove_device":
+					data, _ := msg["data"].(map[string]interface{})
+
+					if ski, ok := data["ski"].(string); ok {
+						if hub.simulationRunning {
+							hub.simulationMu.Lock()
+							// Remove the SKI from simulationDevices
+							for i, deviceSki := range hub.simulationDevices {
+								if deviceSki == ski {
+									hub.simulationDevices = append(hub.simulationDevices[:i], hub.simulationDevices[i+1:]...)
+									log.Printf("Device %s removed from simulation", ski)
+									break
+								}
+							}
+							hub.simulationMu.Unlock()
+						}
+						hub.sendToClient(conn, "device_removed", gin.H{"ski": ski})
+					} else {
+						hub.sendToClient(conn, "error", gin.H{"error": "Missing SKI data"})
 					}
 
 				default:
