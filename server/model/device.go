@@ -1,5 +1,9 @@
 package model
 
+import (
+	ship_api "github.com/enbility/ship-go/api"
+)
+
 type GeneralInfo struct {
 	SpineDeviceAddress      string `json:"spineDeviceAddress"`
 	DeviceName		string `json:"deviceName"`
@@ -21,4 +25,5 @@ type Device struct {
 	GeneralInfo 	GeneralInfo `json:"generalInfo"`
 	SHIPInfo    	SHIPInfo    `json:"shipInfo"`
 	Ski       	string      `json:"ski"`
+	ConnectionState ship_api.ConnectionState `json:"connectionState"`
 }

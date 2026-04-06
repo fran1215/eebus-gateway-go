@@ -9,6 +9,7 @@ import (
 	"time"
 	"sync"
 	log "log"
+	json "encoding/json"
 
 	api "github.com/enbility/eebus-go/api"
 	service "github.com/enbility/eebus-go/service"
@@ -20,6 +21,7 @@ import (
 	cert "github.com/enbility/ship-go/cert"
 	spine_api "github.com/enbility/spine-go/api"
 	spine_model "github.com/enbility/spine-go/model"
+	gin "github.com/gin-gonic/gin"
 
 	"github.com/grandcat/zeroconf"
 	"github.com/gorilla/websocket"
@@ -48,42 +50,44 @@ type Runtime struct {
 
 	mpcCallback MPCEventCallback
 	lpcCallback LPCEventCallback
+
+	Hub *Hub
 }
 
 // WebSocket Hub for managing connections
 type Hub struct {
 	clients           map[*websocket.Conn]bool
 	broadcast         chan []byte
-	register          chan *websocket.Conn
-	unregister        chan *websocket.Conn
+	Register          chan *websocket.Conn
+	Unregister        chan *websocket.Conn
 	mu                sync.RWMutex
-	discoveredDevices map[string]model.Device // Track discovered devices by SKI
+	DiscoveredDevices map[string]model.Device // Track discovered devices by SKI
 	devicesMu         sync.RWMutex
-	simulationDevices []string // Track which devices are in simulation
-	simulationMu      sync.RWMutex
-	simulationRunning bool
+	SimulationDevices []string // Track which devices are in simulation
+	SimulationMu      sync.RWMutex
+	SimulationRunning bool
 }
 
-func newHub() *Hub {
+func NewHub() *Hub {
 	return &Hub{
 		clients:           make(map[*websocket.Conn]bool),
 		broadcast:         make(chan []byte, 256),
-		register:          make(chan *websocket.Conn),
-		unregister:        make(chan *websocket.Conn),
-		discoveredDevices: make(map[string]model.Device),
-		simulationDevices: make([]string, 0),
+		Register:          make(chan *websocket.Conn),
+		Unregister:        make(chan *websocket.Conn),
+		DiscoveredDevices: make(map[string]model.Device),
+		SimulationDevices: make([]string, 0),
 	}
 }
 
-func (h *Hub) run() {
+func (h *Hub) Run() {
 	for {
 		select {
-		case client := <-h.register:
+		case client := <-h.Register:
 			h.mu.Lock()
 			h.clients[client] = true
 			h.mu.Unlock()
 			log.Printf("Client connected. Total clients: %d", len(h.clients))
-		case client := <-h.unregister:
+		case client := <-h.Unregister:
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
@@ -106,7 +110,7 @@ func (h *Hub) run() {
 	}
 }
 
-func (h *Hub) sendMessage(message model.Message) {
+func (h *Hub) SendMessage(message model.Message) {
 	msg := map[string]interface{}{
 		"type":      message.Type,
 		"data":      message.Data,
@@ -120,7 +124,7 @@ func (h *Hub) sendMessage(message model.Message) {
 	h.broadcast <- jsonMsg
 }
 
-func (h *Hub) sendToClient(conn *websocket.Conn, message model.Message) {
+func (h *Hub) SendToClient(conn *websocket.Conn, message model.Message) {
 	msg := map[string]interface{}{
 		"type":      message.Type,
 		"data":      message.Data,
@@ -135,7 +139,7 @@ func (h *Hub) sendToClient(conn *websocket.Conn, message model.Message) {
 }
 
 // Continuous mDNS discovery
-func (h *Hub) startContinuousDiscovery(runtime *runtime.Runtime) {
+func (h *Hub) StartContinuousDiscovery(runtime *Runtime) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -152,23 +156,33 @@ func (h *Hub) startContinuousDiscovery(runtime *runtime.Runtime) {
 		hasNewDevices := false
 		newDevices := []model.Device{}
 
-		// Check for new devices
+		// Check for new devices, update existing ones' network info
 		for _, device := range results {
-			if _, exists := h.discoveredDevices[device.Ski]; !exists {
-				h.discoveredDevices[device.Ski] = device
+			if existing, exists := h.DiscoveredDevices[device.Ski]; !exists {
+				h.DiscoveredDevices[device.Ski] = device
 				newDevices = append(newDevices, device)
 				hasNewDevices = true
 				log.Printf("New device discovered: %s (%s)", device.SHIPInfo.InstanceName, device.Ski)
+			} else {
+				// Preserve connection state, update network info
+				device.ConnectionState = existing.ConnectionState
+				h.DiscoveredDevices[device.Ski] = device
 			}
+		}
+
+		// Build list from stored devices to include connection state
+		allDevices := make([]model.Device, 0, len(h.DiscoveredDevices))
+		for _, d := range h.DiscoveredDevices {
+			allDevices = append(allDevices, d)
 		}
 		h.devicesMu.Unlock()
 
-		// Broadcast all devices to all clients
-		h.sendMessage(model.Message{Type: "mdns_discovery", Data: results})
+		// Broadcast all devices with their current connection state
+		h.SendMessage(model.Message{Type: "mdns_discovery", Data: allDevices})
 
 		// If there are new devices, send a specific notification
 		if hasNewDevices {
-			h.sendMessage(model.Message{Type: "new_devices_discovered", Data: gin.H{
+			h.SendMessage(model.Message{Type: "new_devices_discovered", Data: gin.H{
 				"newDevices": newDevices,
 				"allDevices": results,
 				"newCount":   len(newDevices),
@@ -226,6 +240,8 @@ func NewRuntime(config Config) (*Runtime, error) {
 	   	runtime.cs_lpp.SetFailsafeProductionActivePowerLimit(config.ProductionFailsafePowerLimit, true)
 	   	runtime.cs_lpp.SetFailsafeDurationMinimum(config.ProductionFailsafeDuration, true) */
 
+	runtime.Hub = NewHub()
+
 	runtime.service.Start()
 
 	runtime.service.SetAutoAccept(true)
@@ -272,6 +288,14 @@ func (r *Runtime) ServicePairingDetailUpdate(ski string, detail *ship_api.Connec
 	case ship_api.ConnectionStateError:
 		r.Infof("Connection error with %s", ski)
 	}
+
+	if device, ok := r.Hub.DiscoveredDevices[ski]; ok {
+		device.ConnectionState = detail.State()
+		r.Hub.DiscoveredDevices[ski] = device
+		r.Hub.SendMessage(model.Message{Type: "connection_state_update", Data: device})
+	}
+
+
 }
 
 func (r *Runtime) RegisterSKI(ski string) {

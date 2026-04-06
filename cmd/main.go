@@ -10,7 +10,6 @@ import (
 	signal "os/signal"
 	slices "slices"
 	strconv "strconv"
-	"sync"
 	syscall "syscall"
 	time "time"
 
@@ -19,7 +18,7 @@ import (
 	"github.com/gin-contrib/cors"
 	gin "github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	runtime "github.com/tumbleowlee/eebus-go-rest/server/eebus"
+	"github.com/tumbleowlee/eebus-go-rest/server/eebus"
 	model "github.com/tumbleowlee/eebus-go-rest/server/model"
 
 	rand "math/rand/v2"
@@ -60,7 +59,7 @@ func main() {
 		idNum += strconv.Itoa(rand.IntN(10))
 	}
 
-	config := runtime.Config{
+	config := eebus.Config{
 		VendorCode:                    "vendorCode",
 		DeviceBrand:                   "EEBUSControl",
 		DeviceModel:                   "Simulator",
@@ -83,27 +82,25 @@ func main() {
 
 	messageQueue := model.MessageQueue{}
 
-	runtime, err := runtime.NewRuntime(config)
+	runtime, err := eebus.NewRuntime(config)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 	defer runtime.Stop()
 
-	// Initialize WebSocket hub
-	hub := runtime.newHub()
-	go hub.run()
+	go runtime.Hub.Run()
 
 	// Register MPC event callback to broadcast power updates
 	runtime.SetMPCCallback(func(ski string, power float64, energy float64, current float64, voltage float64, frequency float64) {
 		// Only broadcast MPC updates for devices in the simulation
-		hub.simulationMu.RLock()
-		hub.simulationMu.RUnlock()
+		runtime.Hub.SimulationMu.RLock()
+		runtime.Hub.SimulationMu.RUnlock()
 
-		fmt.Printf("DEBUG: Simulation Running: %v, Devices: %v\n", hub.simulationRunning, hub.simulationDevices)
+		fmt.Printf("DEBUG: Simulation Running: %v, Devices: %v\n", runtime.Hub.SimulationRunning, runtime.Hub.SimulationDevices)
 
-		if hub.simulationRunning && slices.Contains(hub.simulationDevices, ski) {
-			hub.sendMessage(model.Message{Type: "mpc_update", Data: gin.H{
+		if runtime.Hub.SimulationRunning && slices.Contains(runtime.Hub.SimulationDevices, ski) {
+			runtime.Hub.SendMessage(model.Message{Type: "mpc_update", Data: gin.H{
 				"ski":     ski,
 				"power":   power,
 				"energy":  energy,
@@ -118,11 +115,11 @@ func main() {
 	})
 
 	runtime.SetLPCCallback(func(ski string, consumptionNominalMax float64) {
-		hub.simulationMu.RLock()
-		hub.simulationMu.RUnlock()
+		runtime.Hub.SimulationMu.RLock()
+		runtime.Hub.SimulationMu.RUnlock()
 
-		if hub.simulationRunning && slices.Contains(hub.simulationDevices, ski) {
-			hub.sendMessage(model.Message{Type: "lpc_update", Data: gin.H{
+		if runtime.Hub.SimulationRunning && slices.Contains(runtime.Hub.SimulationDevices, ski) {
+			runtime.Hub.SendMessage(model.Message{Type: "lpc_update", Data: gin.H{
 				"ski":                     ski,
 				"consumption_nominal_max": consumptionNominalMax,
 			}})
@@ -153,7 +150,7 @@ func main() {
 	}()
 
 	// Start continuous mDNS discovery
-	go hub.startContinuousDiscovery(runtime)
+	go runtime.Hub.StartContinuousDiscovery(runtime)
 
 	router := gin.Default()
 
@@ -174,10 +171,10 @@ func main() {
 			log.Printf("Failed to upgrade connection: %v", err)
 			return
 		}
-		hub.register <- conn
+		runtime.Hub.Register <- conn
 
 		// Send initial connection message
-		hub.sendToClient(conn, model.Message{Type: "connected", Data: gin.H{
+		runtime.Hub.SendToClient(conn, model.Message{Type: "connected", Data: gin.H{
 			"message": "WebSocket connection established",
 			"ski":     runtime.GetLocalSKI(),
 		}})
@@ -185,7 +182,7 @@ func main() {
 		// Handle incoming messages
 		go func() {
 			defer func() {
-				hub.unregister <- conn
+				runtime.Hub.Unregister <- conn
 			}()
 			for {
 				_, message, err := conn.ReadMessage()
@@ -199,13 +196,13 @@ func main() {
 				// Parse incoming message
 				var msg map[string]interface{}
 				if err := json.Unmarshal(message, &msg); err != nil {
-					hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid JSON"}})
+					runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid JSON"}})
 					continue
 				}
 
 				msgType, ok := msg["type"].(string)
 				if !ok {
-					hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing message type"}})
+					runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing message type"}})
 					continue
 				}
 
@@ -214,12 +211,12 @@ func main() {
 				// Handle different message types
 				switch msgType {
 				case "get_local_ski":
-					hub.sendToClient(conn, model.Message{Type: "local_ski", Data: gin.H{
+					runtime.Hub.SendToClient(conn, model.Message{Type: "local_ski", Data: gin.H{
 						"ski": runtime.GetLocalSKI(),
 					}})
 
 				case "get_remote_skis":
-					hub.sendToClient(conn, model.Message{Type: "remote_skis", Data: gin.H{
+					runtime.Hub.SendToClient(conn, model.Message{Type: "remote_skis", Data: gin.H{
 						"remotes": runtime.GetRemoteSKIs(),
 					}})
 
@@ -227,10 +224,10 @@ func main() {
 					data, _ := msg["data"].(map[string]interface{})
 					if ski, ok := data["ski"].(string); ok {
 						runtime.RegisterSKI(ski)
-						hub.sendToClient(conn, model.Message{Type: "ski_registered", Data: gin.H{"ski": ski}})
-						hub.sendMessage(model.Message{Type: "ski_registered", Data: gin.H{"ski": ski}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "ski_registered", Data: gin.H{"ski": ski}})
+						runtime.Hub.SendMessage(model.Message{Type: "ski_registered", Data: gin.H{"ski": ski}})
 					} else {
-						hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid SKI data"}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid SKI data"}})
 					}
 
 				case "register_skis":
@@ -243,63 +240,63 @@ func main() {
 								runtime.RegisterSKI(ski)
 							}
 						}
-						hub.sendToClient(conn, model.Message{Type: "skis_registered", Data: gin.H{"skis": skis}})
-						hub.sendMessage(model.Message{Type: "skis_registered", Data: gin.H{"skis": skis}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "skis_registered", Data: gin.H{"skis": skis}})
+						runtime.Hub.SendMessage(model.Message{Type: "skis_registered", Data: gin.H{"skis": skis}})
 					} else {
-						hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid SKIs data"}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid SKIs data"}})
 					}
 
 				case "get_lpp":
 					lpp, err := runtime.GetLPP()
 					if err != nil {
-						hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
 					} else {
-						hub.sendToClient(conn, model.Message{Type: "lpp", Data: gin.H{"limit": lpp}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "lpp", Data: gin.H{"limit": lpp}})
 					}
 
 				case "get_lpc":
 					lpc, err := runtime.GetLPC()
 					if err != nil {
-						hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
 					} else {
-						hub.sendToClient(conn, model.Message{Type: "lpc", Data: gin.H{"limit": lpc}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "lpc", Data: gin.H{"limit": lpc}})
 					}
 
 				case "get_log_level":
-					hub.sendToClient(conn, model.Message{Type: "log_level", Data: gin.H{"level": runtime.GetLogLevel()}})
+					runtime.Hub.SendToClient(conn, model.Message{Type: "log_level", Data: gin.H{"level": runtime.GetLogLevel()}})
 
 				case "set_log_level":
 					data, _ := msg["data"].(map[string]interface{})
 					if level, ok := data["level"].(string); ok {
 						intLevel, err := strconv.Atoi(level)
 						if err != nil {
-							hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid log level"}})
+							runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid log level"}})
 							break
 						}
 						runtime.SetLogLevel(intLevel)
-						hub.sendToClient(conn, model.Message{Type: "log_level_changed", Data: gin.H{"level": level}})
-						hub.sendMessage(model.Message{Type: "log_level_changed", Data: gin.H{"level": level}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "log_level_changed", Data: gin.H{"level": level}})
+						runtime.Hub.SendMessage(model.Message{Type: "log_level_changed", Data: gin.H{"level": level}})
 					} else {
-						hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid log level"}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid log level"}})
 					}
 
 				case "mdns_discovery":
 					results, err := runtime.MDNSDiscovery(2 * time.Second)
 					if err != nil {
-						hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
 					} else {
-						hub.sendToClient(conn, model.Message{Type: "mdns_discovery", Data: results})
-						hub.sendMessage(model.Message{Type: "mdns_discovery", Data: results})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "mdns_discovery", Data: results})
+						runtime.Hub.SendMessage(model.Message{Type: "mdns_discovery", Data: results})
 					}
 
 				case "start_simulation":
 					data, _ := msg["data"].(map[string]interface{})
-					if !hub.simulationRunning {
+					if !runtime.Hub.SimulationRunning {
 						if devicesData, ok := data["devices"]; ok {
 							// Convert to JSON and back to properly unmarshal
 							jsonData, err := json.Marshal(devicesData)
 							if err != nil {
-								hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid devices data"}})
+								runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid devices data"}})
 								break
 							}
 
@@ -307,30 +304,30 @@ func main() {
 
 							var devices []string
 							if err := json.Unmarshal(jsonData, &devices); err != nil {
-								hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid devices format"}})
+								runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid devices format"}})
 								break
 							}
 
 							// Update the simulation devices list
-							hub.simulationMu.Lock()
-							hub.simulationDevices = make([]string, 0)
+							runtime.Hub.SimulationMu.Lock()
+							runtime.Hub.SimulationDevices = make([]string, 0)
 							for _, device := range devices {
-								hub.simulationDevices = append(hub.simulationDevices, device)
+								runtime.Hub.SimulationDevices = append(runtime.Hub.SimulationDevices, device)
 								log.Printf("Device %s added to simulation", device)
 							}
-							hub.simulationMu.Unlock()
+							runtime.Hub.SimulationMu.Unlock()
 
 							err = runtime.StartSimulation(devices)
 							if err != nil {
-								hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
-								hub.sendMessage(model.Message{Type: "simulation_error", Data: gin.H{"error": err.Error()}})
+								runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
+								runtime.Hub.SendMessage(model.Message{Type: "simulation_error", Data: gin.H{"error": err.Error()}})
 							} else {
-								hub.simulationRunning = true
-								hub.sendToClient(conn, model.Message{Type: "simulation_started", Data: gin.H{
+								runtime.Hub.SimulationRunning = true
+								runtime.Hub.SendToClient(conn, model.Message{Type: "simulation_started", Data: gin.H{
 									"status":  "Simulation started",
 									"devices": devices,
 								}})
-								hub.sendMessage(model.Message{Type: "simulation_started", Data: gin.H{
+								runtime.Hub.SendMessage(model.Message{Type: "simulation_started", Data: gin.H{
 									"status":  "Simulation started",
 									"devices": devices,
 								}})
@@ -343,72 +340,72 @@ func main() {
 											break
 										}
 										if data, ok := msg.Data.(map[string]interface{}); ok {
-											if ski, ok := data["ski"].(string); ok && slices.Contains(hub.simulationDevices, ski) {
+											if ski, ok := data["ski"].(string); ok && slices.Contains(runtime.Hub.SimulationDevices, ski) {
 												log.Printf("Sending queued message for SKI %s (%d messages left) after simulation start: %v", ski, messageQueue.Size(), msg)
-												hub.sendMessage(msg)
+												runtime.Hub.SendMessage(msg)
 											}
 										}
 									}
 								}
 							}
 						} else {
-							hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing devices data"}})
+							runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing devices data"}})
 						}
 					}
 
 				case "stop_simulation":
 					err := runtime.StopSimulation()
 					if err != nil {
-						hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
-						hub.sendMessage(model.Message{Type: "simulation_error", Data: gin.H{"error": err.Error()}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
+						runtime.Hub.SendMessage(model.Message{Type: "simulation_error", Data: gin.H{"error": err.Error()}})
 					}
-					hub.simulationRunning = false
-					hub.simulationMu.Lock()
-					hub.simulationDevices = make([]string, 0)
-					hub.simulationMu.Unlock()
-					hub.sendToClient(conn, model.Message{Type: "simulation_stopped", Data: gin.H{"status": "Simulation stopped"}})
-					hub.sendMessage(model.Message{Type: "simulation_stopped", Data: gin.H{"status": "Simulation stopped"}})
+					runtime.Hub.SimulationRunning = false
+					runtime.Hub.SimulationMu.Lock()
+					runtime.Hub.SimulationDevices = make([]string, 0)
+					runtime.Hub.SimulationMu.Unlock()
+					runtime.Hub.SendToClient(conn, model.Message{Type: "simulation_stopped", Data: gin.H{"status": "Simulation stopped"}})
+					runtime.Hub.SendMessage(model.Message{Type: "simulation_stopped", Data: gin.H{"status": "Simulation stopped"}})
 
 				case "add_device":
 					data, _ := msg["data"].(map[string]interface{})
 
 					if ski, ok := data["ski"].(string); ok {
-						if hub.simulationRunning {
-							hub.simulationMu.Lock()
-							if !slices.Contains(hub.simulationDevices, ski) {
-								hub.simulationDevices = append(hub.simulationDevices, ski)
+						if runtime.Hub.SimulationRunning {
+							runtime.Hub.SimulationMu.Lock()
+							if !slices.Contains(runtime.Hub.SimulationDevices, ski) {
+								runtime.Hub.SimulationDevices = append(runtime.Hub.SimulationDevices, ski)
 								log.Printf("Device %s added to running simulation", ski)
 							}
-							hub.simulationMu.Unlock()
+							runtime.Hub.SimulationMu.Unlock()
 						}
-						hub.sendToClient(conn, model.Message{Type: "device_added", Data: gin.H{"ski": ski}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "device_added", Data: gin.H{"ski": ski}})
 					} else {
-						hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing SKI data"}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing SKI data"}})
 					}
 
 				case "remove_device":
 					data, _ := msg["data"].(map[string]interface{})
 
 					if ski, ok := data["ski"].(string); ok {
-						if hub.simulationRunning {
-							hub.simulationMu.Lock()
+						if runtime.Hub.SimulationRunning {
+							runtime.Hub.SimulationMu.Lock()
 							// Remove the SKI from simulationDevices
-							for i, deviceSki := range hub.simulationDevices {
+							for i, deviceSki := range runtime.Hub.SimulationDevices {
 								if deviceSki == ski {
-									hub.simulationDevices = append(hub.simulationDevices[:i], hub.simulationDevices[i+1:]...)
+									runtime.Hub.SimulationDevices = append(runtime.Hub.SimulationDevices[:i], runtime.Hub.SimulationDevices[i+1:]...)
 									log.Printf("Device %s removed from simulation", ski)
 									break
 								}
 							}
-							hub.simulationMu.Unlock()
+							runtime.Hub.SimulationMu.Unlock()
 						}
-						hub.sendToClient(conn, model.Message{Type: "device_removed", Data: gin.H{"ski": ski}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "device_removed", Data: gin.H{"ski": ski}})
 					} else {
-						hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing SKI data"}})
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing SKI data"}})
 					}
 
 				default:
-					hub.sendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Unknown message type: " + msgType}})
+					runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Unknown message type: " + msgType}})
 				}
 			}
 		}()
