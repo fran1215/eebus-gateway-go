@@ -22,8 +22,9 @@ type SHIPInfo struct {
 }
 
 type Device struct {
-	GeneralInfo 	GeneralInfo `json:"generalInfo"`
-	SHIPInfo    	SHIPInfo    `json:"shipInfo"`
-	Ski       	string      `json:"ski"`
+	GeneralInfo     GeneralInfo              `json:"generalInfo"`
+	SHIPInfo        SHIPInfo                 `json:"shipInfo"`
+	Ski             string                   `json:"ski"`
 	ConnectionState ship_api.ConnectionState `json:"connectionState"`
+	Simulated       bool                     `json:"simulated"`
 }

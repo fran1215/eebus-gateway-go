@@ -33,6 +33,18 @@ type MPCEventCallback func(ski string, power float64, energy float64, current fl
 
 type LPCEventCallback func(ski string, consumptionNominalMax float64)
 
+// WebSocket Hub for managing connections
+type Hub struct {
+	clients           map[*websocket.Conn]bool
+	broadcast         chan []byte
+	Register          chan *websocket.Conn
+	Unregister        chan *websocket.Conn
+	mu                sync.RWMutex
+	DiscoveredDevices map[string]model.Device // Track discovered devices by SKI
+	devicesMu         sync.RWMutex
+	SimulationRunning bool
+}
+
 type Runtime struct {
 	loglevel int
 
@@ -54,20 +66,6 @@ type Runtime struct {
 	Hub *Hub
 }
 
-// WebSocket Hub for managing connections
-type Hub struct {
-	clients           map[*websocket.Conn]bool
-	broadcast         chan []byte
-	Register          chan *websocket.Conn
-	Unregister        chan *websocket.Conn
-	mu                sync.RWMutex
-	DiscoveredDevices map[string]model.Device // Track discovered devices by SKI
-	devicesMu         sync.RWMutex
-	SimulationDevices []string // Track which devices are in simulation
-	SimulationMu      sync.RWMutex
-	SimulationRunning bool
-}
-
 func NewHub() *Hub {
 	return &Hub{
 		clients:           make(map[*websocket.Conn]bool),
@@ -75,7 +73,6 @@ func NewHub() *Hub {
 		Register:          make(chan *websocket.Conn),
 		Unregister:        make(chan *websocket.Conn),
 		DiscoveredDevices: make(map[string]model.Device),
-		SimulationDevices: make([]string, 0),
 	}
 }
 
@@ -107,6 +104,33 @@ func (h *Hub) Run() {
 			}
 			h.mu.RUnlock()
 		}
+	}
+}
+
+func (h *Hub) SetDeviceSimulated(ski string, simulated bool) {
+	h.devicesMu.Lock()
+	defer h.devicesMu.Unlock()
+	if device, ok := h.DiscoveredDevices[ski]; ok {
+		device.Simulated = simulated
+		h.DiscoveredDevices[ski] = device
+	}
+}
+
+func (h *Hub) IsDeviceSimulated(ski string) bool {
+	h.devicesMu.RLock()
+	defer h.devicesMu.RUnlock()
+	if device, ok := h.DiscoveredDevices[ski]; ok {
+		return device.Simulated
+	}
+	return false
+}
+
+func (h *Hub) ClearAllSimulated() {
+	h.devicesMu.Lock()
+	defer h.devicesMu.Unlock()
+	for ski, device := range h.DiscoveredDevices {
+		device.Simulated = false
+		h.DiscoveredDevices[ski] = device
 	}
 }
 

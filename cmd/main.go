@@ -8,8 +8,7 @@ import (
 	http "net/http"
 	os "os"
 	signal "os/signal"
-	slices "slices"
-	strconv "strconv"
+strconv "strconv"
 	syscall "syscall"
 	time "time"
 
@@ -93,19 +92,13 @@ func main() {
 
 	// Register MPC event callback to broadcast power updates
 	runtime.SetMPCCallback(func(ski string, power float64, energy float64, current float64, voltage float64, frequency float64) {
-		// Only broadcast MPC updates for devices in the simulation
-		runtime.Hub.SimulationMu.RLock()
-		runtime.Hub.SimulationMu.RUnlock()
-
-		fmt.Printf("DEBUG: Simulation Running: %v, Devices: %v\n", runtime.Hub.SimulationRunning, runtime.Hub.SimulationDevices)
-
-		if runtime.Hub.SimulationRunning && slices.Contains(runtime.Hub.SimulationDevices, ski) {
+		if runtime.Hub.SimulationRunning && runtime.Hub.IsDeviceSimulated(ski) {
 			runtime.Hub.SendMessage(model.Message{Type: "mpc_update", Data: gin.H{
-				"ski":     ski,
-				"power":   power,
-				"energy":  energy,
-				"current": current,
-				"voltage": voltage,
+				"ski":       ski,
+				"power":     power,
+				"energy":    energy,
+				"current":   current,
+				"voltage":   voltage,
 				"frequency": frequency,
 			}})
 			log.Printf("MPC Update from %s: Power=%.2f W, Energy=%.2f Wh, Current=%.2f A, Voltage=%.2f V, Frequency=%.2f Hz", ski, power, energy, current, voltage, frequency)
@@ -115,10 +108,7 @@ func main() {
 	})
 
 	runtime.SetLPCCallback(func(ski string, consumptionNominalMax float64) {
-		runtime.Hub.SimulationMu.RLock()
-		runtime.Hub.SimulationMu.RUnlock()
-
-		if runtime.Hub.SimulationRunning && slices.Contains(runtime.Hub.SimulationDevices, ski) {
+		if runtime.Hub.SimulationRunning && runtime.Hub.IsDeviceSimulated(ski) {
 			runtime.Hub.SendMessage(model.Message{Type: "lpc_update", Data: gin.H{
 				"ski":                     ski,
 				"consumption_nominal_max": consumptionNominalMax,
@@ -293,14 +283,11 @@ func main() {
 					data, _ := msg["data"].(map[string]interface{})
 					if !runtime.Hub.SimulationRunning {
 						if devicesData, ok := data["devices"]; ok {
-							// Convert to JSON and back to properly unmarshal
 							jsonData, err := json.Marshal(devicesData)
 							if err != nil {
 								runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Invalid devices data"}})
 								break
 							}
-
-							fmt.Println(string(jsonData))
 
 							var devices []string
 							if err := json.Unmarshal(jsonData, &devices); err != nil {
@@ -308,14 +295,10 @@ func main() {
 								break
 							}
 
-							// Update the simulation devices list
-							runtime.Hub.SimulationMu.Lock()
-							runtime.Hub.SimulationDevices = make([]string, 0)
-							for _, device := range devices {
-								runtime.Hub.SimulationDevices = append(runtime.Hub.SimulationDevices, device)
-								log.Printf("Device %s added to simulation", device)
+							for _, ski := range devices {
+								runtime.Hub.SetDeviceSimulated(ski, true)
+								log.Printf("Device %s added to simulation", ski)
 							}
-							runtime.Hub.SimulationMu.Unlock()
 
 							err = runtime.StartSimulation(devices)
 							if err != nil {
@@ -332,7 +315,7 @@ func main() {
 									"devices": devices,
 								}})
 
-								if(!messageQueue.IsEmpty()) {
+								if !messageQueue.IsEmpty() {
 									log.Printf("Queued messages (%d) after simulation start", messageQueue.Size())
 									for !messageQueue.IsEmpty() {
 										msg, err := messageQueue.Dequeue()
@@ -340,7 +323,7 @@ func main() {
 											break
 										}
 										if data, ok := msg.Data.(map[string]interface{}); ok {
-											if ski, ok := data["ski"].(string); ok && slices.Contains(runtime.Hub.SimulationDevices, ski) {
+											if ski, ok := data["ski"].(string); ok && runtime.Hub.IsDeviceSimulated(ski) {
 												log.Printf("Sending queued message for SKI %s (%d messages left) after simulation start: %v", ski, messageQueue.Size(), msg)
 												runtime.Hub.SendMessage(msg)
 											}
@@ -360,9 +343,7 @@ func main() {
 						runtime.Hub.SendMessage(model.Message{Type: "simulation_error", Data: gin.H{"error": err.Error()}})
 					}
 					runtime.Hub.SimulationRunning = false
-					runtime.Hub.SimulationMu.Lock()
-					runtime.Hub.SimulationDevices = make([]string, 0)
-					runtime.Hub.SimulationMu.Unlock()
+					runtime.Hub.ClearAllSimulated()
 					runtime.Hub.SendToClient(conn, model.Message{Type: "simulation_stopped", Data: gin.H{"status": "Simulation stopped"}})
 					runtime.Hub.SendMessage(model.Message{Type: "simulation_stopped", Data: gin.H{"status": "Simulation stopped"}})
 
@@ -371,12 +352,8 @@ func main() {
 
 					if ski, ok := data["ski"].(string); ok {
 						if runtime.Hub.SimulationRunning {
-							runtime.Hub.SimulationMu.Lock()
-							if !slices.Contains(runtime.Hub.SimulationDevices, ski) {
-								runtime.Hub.SimulationDevices = append(runtime.Hub.SimulationDevices, ski)
-								log.Printf("Device %s added to running simulation", ski)
-							}
-							runtime.Hub.SimulationMu.Unlock()
+							runtime.Hub.SetDeviceSimulated(ski, true)
+							log.Printf("Device %s added to running simulation", ski)
 						}
 						runtime.Hub.SendToClient(conn, model.Message{Type: "device_added", Data: gin.H{"ski": ski}})
 					} else {
@@ -388,16 +365,8 @@ func main() {
 
 					if ski, ok := data["ski"].(string); ok {
 						if runtime.Hub.SimulationRunning {
-							runtime.Hub.SimulationMu.Lock()
-							// Remove the SKI from simulationDevices
-							for i, deviceSki := range runtime.Hub.SimulationDevices {
-								if deviceSki == ski {
-									runtime.Hub.SimulationDevices = append(runtime.Hub.SimulationDevices[:i], runtime.Hub.SimulationDevices[i+1:]...)
-									log.Printf("Device %s removed from simulation", ski)
-									break
-								}
-							}
-							runtime.Hub.SimulationMu.Unlock()
+							runtime.Hub.SetDeviceSimulated(ski, false)
+							log.Printf("Device %s removed from simulation", ski)
 						}
 						runtime.Hub.SendToClient(conn, model.Message{Type: "device_removed", Data: gin.H{"ski": ski}})
 					} else {
