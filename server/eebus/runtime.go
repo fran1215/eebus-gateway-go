@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"sync"
+	log "log"
 
 	api "github.com/enbility/eebus-go/api"
 	service "github.com/enbility/eebus-go/service"
@@ -20,11 +22,14 @@ import (
 	spine_model "github.com/enbility/spine-go/model"
 
 	"github.com/grandcat/zeroconf"
+	"github.com/gorilla/websocket"
 
 	model "github.com/tumbleowlee/eebus-go-rest/server/model"
 )
 
 type MPCEventCallback func(ski string, power float64, energy float64, current float64, voltage float64, frequency float64)
+
+type LPCEventCallback func(ski string, consumptionNominalMax float64)
 
 type Runtime struct {
 	loglevel int
@@ -33,6 +38,8 @@ type Runtime struct {
 	local_ski  string
 	remote_ski []string
 
+	consumptionNominalMax float64
+
 	cs_lpc usecase_api.CsLPCInterface
 	cs_lpp usecase_api.CsLPPInterface
 	eg_lpc usecase_api.EgLPCInterface
@@ -40,6 +47,134 @@ type Runtime struct {
 	ma_mpc usecase_api.MaMPCInterface
 
 	mpcCallback MPCEventCallback
+	lpcCallback LPCEventCallback
+}
+
+// WebSocket Hub for managing connections
+type Hub struct {
+	clients           map[*websocket.Conn]bool
+	broadcast         chan []byte
+	register          chan *websocket.Conn
+	unregister        chan *websocket.Conn
+	mu                sync.RWMutex
+	discoveredDevices map[string]model.Device // Track discovered devices by SKI
+	devicesMu         sync.RWMutex
+	simulationDevices []string // Track which devices are in simulation
+	simulationMu      sync.RWMutex
+	simulationRunning bool
+}
+
+func newHub() *Hub {
+	return &Hub{
+		clients:           make(map[*websocket.Conn]bool),
+		broadcast:         make(chan []byte, 256),
+		register:          make(chan *websocket.Conn),
+		unregister:        make(chan *websocket.Conn),
+		discoveredDevices: make(map[string]model.Device),
+		simulationDevices: make([]string, 0),
+	}
+}
+
+func (h *Hub) run() {
+	for {
+		select {
+		case client := <-h.register:
+			h.mu.Lock()
+			h.clients[client] = true
+			h.mu.Unlock()
+			log.Printf("Client connected. Total clients: %d", len(h.clients))
+		case client := <-h.unregister:
+			h.mu.Lock()
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				client.Close()
+			}
+			h.mu.Unlock()
+			log.Printf("Client disconnected. Total clients: %d", len(h.clients))
+		case message := <-h.broadcast:
+			h.mu.RLock()
+			for client := range h.clients {
+				err := client.WriteMessage(websocket.TextMessage, message)
+				if err != nil {
+					log.Printf("Error broadcasting to client: %v", err)
+					client.Close()
+					delete(h.clients, client)
+				}
+			}
+			h.mu.RUnlock()
+		}
+	}
+}
+
+func (h *Hub) sendMessage(message model.Message) {
+	msg := map[string]interface{}{
+		"type":      message.Type,
+		"data":      message.Data,
+		"timestamp": time.Now().Unix(),
+	}
+	jsonMsg, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("Error marshaling message: %v", err)
+		return
+	}
+	h.broadcast <- jsonMsg
+}
+
+func (h *Hub) sendToClient(conn *websocket.Conn, message model.Message) {
+	msg := map[string]interface{}{
+		"type":      message.Type,
+		"data":      message.Data,
+		"timestamp": time.Now().Unix(),
+	}
+	jsonMsg, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("Error marshaling message: %v", err)
+		return
+	}
+	conn.WriteMessage(websocket.TextMessage, jsonMsg)
+}
+
+// Continuous mDNS discovery
+func (h *Hub) startContinuousDiscovery(runtime *runtime.Runtime) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	log.Println("Starting continuous mDNS discovery...")
+
+	for range ticker.C {
+		results, err := runtime.MDNSDiscovery(3 * time.Second)
+		if err != nil {
+			log.Printf("mDNS discovery error: %v", err)
+			continue
+		}
+
+		h.devicesMu.Lock()
+		hasNewDevices := false
+		newDevices := []model.Device{}
+
+		// Check for new devices
+		for _, device := range results {
+			if _, exists := h.discoveredDevices[device.Ski]; !exists {
+				h.discoveredDevices[device.Ski] = device
+				newDevices = append(newDevices, device)
+				hasNewDevices = true
+				log.Printf("New device discovered: %s (%s)", device.SHIPInfo.InstanceName, device.Ski)
+			}
+		}
+		h.devicesMu.Unlock()
+
+		// Broadcast all devices to all clients
+		h.sendMessage(model.Message{Type: "mdns_discovery", Data: results})
+
+		// If there are new devices, send a specific notification
+		if hasNewDevices {
+			h.sendMessage(model.Message{Type: "new_devices_discovered", Data: gin.H{
+				"newDevices": newDevices,
+				"allDevices": results,
+				"newCount":   len(newDevices),
+			}})
+		}
+	}
 }
 
 func NewRuntime(config Config) (*Runtime, error) {
@@ -153,6 +288,20 @@ func (r *Runtime) OnLPCEvent(ski string, device spine_api.DeviceRemoteInterface,
 		for counter := range pending {
 			r.cs_lpc.ApproveOrDenyConsumptionLimit(counter, true, "")
 		}
+	case usecase_eg_lpc.UseCaseSupportUpdate:
+		scenarios := r.eg_lpc.AvailableScenariosForEntity(entity)
+
+		for _, scenario := range scenarios {
+			if(scenario == 4) {
+				consumptionNominalMax, err := r.eg_lpc.ConsumptionNominalMax(entity);
+				if err != nil {
+					r.Debugf("Failed to get consumption nominal max: %v", err)
+					return
+				}
+				r.consumptionNominalMax = consumptionNominalMax
+				r.Debugf("Consumption Nominal Max: %v", r.consumptionNominalMax)
+			}
+		}
 	}
 }
 
@@ -229,6 +378,10 @@ func (r *Runtime) OnMPCEvent(ski string, device spine_api.DeviceRemoteInterface,
 
 func (r *Runtime) SetMPCCallback(callback MPCEventCallback) {
 	r.mpcCallback = callback
+}
+
+func (r *Runtime) SetLPCCallback(callback LPCEventCallback) {
+	r.lpcCallback = callback
 }
 
 func (r *Runtime) StartSimulation(skis []string) error {
