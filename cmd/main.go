@@ -372,10 +372,38 @@ func main() {
 					} else {
 						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing SKI data"}})
 					}
-
+				case "lpc_limit":
+					data, _ := msg["data"].(map[string]interface{})
+					if ski, ok := data["ski"].(string); ok {
+						if limit, ok := data["limit"].(float64); ok {
+							if duration, ok := data["duration"].(float64); ok {
+								// Convert duration from seconds to time.Duration
+								durationTime := time.Duration(duration) * time.Second
+								if isActive, ok := data["active"].(bool); ok {
+									err := runtime.SendLPC(ski, limit, isActive, durationTime)
+									if err != nil {
+										runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
+									}
+								} else {
+									runtime.Hub.SendToClient(conn, model.Message{Type: "lpc_limit_set", Data: gin.H{"ski": ski, "limit": limit, "duration": duration}})
+									runtime.Hub.SendMessage(model.Message{Type: "lpc_limit_set", Data: gin.H{"ski": ski, "limit": limit, "duration": duration}})
+								}
+								
+							} else {
+								runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing or invalid duration data"}})
+							}
+						} else {
+							runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing or invalid limit data"}})
+						}
+					} else {
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing SKI data"}})
+					}
 				default:
 					runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Unknown message type: " + msgType}})
 				}
+
+				
+
 			}
 		}()
 	})

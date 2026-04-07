@@ -432,6 +432,41 @@ func (r *Runtime) SetLPCCallback(callback LPCEventCallback) {
 	r.lpcCallback = callback
 }
 
+func (r *Runtime) SendLPC(ski string, consumptionNominalMax float64, isActive bool, duration time.Duration) error {
+	if r.eg_lpc == nil {
+		return fmt.Errorf("EG LPC use case not initialized")
+	}
+
+	remoteDevice := r.service.LocalDevice().RemoteDeviceForSki(ski)
+	if remoteDevice == nil {
+		return fmt.Errorf("no remote device found for SKI %s", ski)
+	}
+
+	// Find a compatible remote entity
+	var remoteEntity spine_api.EntityRemoteInterface
+	for _, entity := range remoteDevice.Entities() {
+		if r.eg_lpc.IsCompatibleEntityType(entity) {
+			remoteEntity = entity
+			break
+		}
+	}
+	if remoteEntity == nil {
+		return fmt.Errorf("no compatible LPC entity found on device %s", ski)
+	}
+
+	if r.lpcCallback != nil {
+		r.lpcCallback(ski, consumptionNominalMax)
+	}
+
+	_, err := r.eg_lpc.WriteConsumptionLimit(remoteEntity, usecase_api.LoadLimit{
+		Duration:     duration,
+		Value:        consumptionNominalMax,
+		IsChangeable: true,
+		IsActive:     isActive,
+	}, nil)
+	return err
+}
+
 func (r *Runtime) StartSimulation(skis []string) error {
 	for _, ski := range skis {
 		if ski == r.local_ski {
