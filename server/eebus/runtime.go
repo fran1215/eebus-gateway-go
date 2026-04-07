@@ -467,6 +467,68 @@ func (r *Runtime) SendLPC(ski string, consumptionNominalMax float64, isActive bo
 	return err
 }
 
+func (r *Runtime) SendLPCFailsafeValue(ski string, failsafeValue float64) error {
+	if r.eg_lpc == nil {
+		return fmt.Errorf("EG LPC use case not initialized")
+	}
+	
+	remoteDevice := r.service.LocalDevice().RemoteDeviceForSki(ski)
+	if remoteDevice == nil {
+		return fmt.Errorf("no remote device found for SKI %s", ski)
+	}
+
+	// Find a compatible remote entity
+	var remoteEntity spine_api.EntityRemoteInterface
+	for _, entity := range remoteDevice.Entities() {
+		if r.eg_lpc.IsCompatibleEntityType(entity) {
+			remoteEntity = entity
+			break
+		}
+	}
+	if remoteEntity == nil {
+		return fmt.Errorf("no compatible LPC entity found on device %s", ski)
+	}
+	
+	_, err := r.eg_lpc.WriteFailsafeConsumptionActivePowerLimit(remoteEntity, failsafeValue)
+
+	if err != nil {
+		return fmt.Errorf("failed to write failsafe consumption active power limit: %v", err)
+	}
+
+	return err
+}
+
+func (r *Runtime) SendLPCFailsafeDuration(ski string, failsafeDuration time.Duration) error {
+	if r.eg_lpc == nil {
+		return fmt.Errorf("EG LPC use case not initialized")
+	}
+	
+	remoteDevice := r.service.LocalDevice().RemoteDeviceForSki(ski)
+	if remoteDevice == nil {
+		return fmt.Errorf("no remote device found for SKI %s", ski)
+	}
+	
+	// Find a compatible remote entity
+	var remoteEntity spine_api.EntityRemoteInterface
+	for _, entity := range remoteDevice.Entities() {
+		if r.eg_lpc.IsCompatibleEntityType(entity) {
+			remoteEntity = entity
+			break
+		}
+	}
+	if remoteEntity == nil {
+		return fmt.Errorf("no compatible LPC entity found on device %s", ski)
+	}
+	
+	_, err := r.eg_lpc.WriteFailsafeDurationMinimum(remoteEntity, failsafeDuration)
+	
+	if err != nil {
+		return fmt.Errorf("failed to write failsafe duration minimum: %v", err)
+	}
+
+	return err
+}
+
 func (r *Runtime) StartSimulation(skis []string) error {
 	for _, ski := range skis {
 		if ski == r.local_ski {

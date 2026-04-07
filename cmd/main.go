@@ -398,6 +398,42 @@ func main() {
 					} else {
 						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing SKI data"}})
 					}
+				case "lpc_failsafe_value":
+					data, _ := msg["data"].(map[string]interface{})
+					if ski, ok := data["ski"].(string); ok {
+						if limit, ok := data["value"].(float64); ok {
+							err := runtime.SendLPCFailsafeValue(ski, limit)
+							if err != nil {
+								runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
+							} else {
+								runtime.Hub.SendToClient(conn, model.Message{Type: "lpc_failsafe_value_set", Data: gin.H{"ski": ski, "limit": limit}})
+								runtime.Hub.SendMessage(model.Message{Type: "lpc_failsafe_value_set", Data: gin.H{"ski": ski, "limit": limit}})
+							}
+						} else {
+							runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing or invalid limit data"}})
+						}
+					} else {
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing SKI data"}})
+					}
+				case "lpc_failsafe_duration":
+					data, _ := msg["data"].(map[string]interface{})
+					if ski, ok := data["ski"].(string); ok {
+						if duration, ok := data["duration"].(float64); ok {
+							// Convert duration from seconds to time.Duration
+							durationTime := time.Duration(duration) * time.Second
+							err := runtime.SendLPCFailsafeDuration(ski, durationTime)
+							if err != nil {
+								runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": err.Error()}})
+							} else {
+								runtime.Hub.SendToClient(conn, model.Message{Type: "lpc_failsafe_duration_set", Data: gin.H{"ski": ski, "duration": duration}})
+								runtime.Hub.SendMessage(model.Message{Type: "lpc_failsafe_duration_set", Data: gin.H{"ski": ski, "duration": duration}})
+							}
+						} else {
+							runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing or invalid duration data"}})
+						}
+					} else {
+						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing SKI data"}})
+					}
 				default:
 					runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Unknown message type: " + msgType}})
 				}
