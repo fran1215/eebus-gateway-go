@@ -159,7 +159,14 @@ func (h *Hub) SendToClient(conn *websocket.Conn, message model.Message) {
 		log.Printf("Error marshaling message: %v", err)
 		return
 	}
-	conn.WriteMessage(websocket.TextMessage, jsonMsg)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	err = conn.WriteMessage(websocket.TextMessage, jsonMsg)
+	if err != nil {
+		log.Printf("Error sending message to client: %v", err)
+		conn.Close()
+		delete(h.clients, conn)
+	}
 }
 
 // Continuous mDNS discovery
