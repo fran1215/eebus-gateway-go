@@ -8,7 +8,7 @@ import (
 	http "net/http"
 	os "os"
 	signal "os/signal"
-strconv "strconv"
+	strconv "strconv"
 	syscall "syscall"
 	time "time"
 
@@ -388,7 +388,7 @@ func main() {
 									runtime.Hub.SendToClient(conn, model.Message{Type: "lpc_limit_set", Data: gin.H{"ski": ski, "limit": limit, "duration": duration}})
 									runtime.Hub.SendMessage(model.Message{Type: "lpc_limit_set", Data: gin.H{"ski": ski, "limit": limit, "duration": duration}})
 								}
-								
+
 							} else {
 								runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing or invalid duration data"}})
 							}
@@ -437,8 +437,6 @@ func main() {
 				default:
 					runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Unknown message type: " + msgType}})
 				}
-
-				
 
 			}
 		}()

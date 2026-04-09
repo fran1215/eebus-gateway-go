@@ -3,13 +3,13 @@ package eebus
 import (
 	"context"
 	"crypto/x509"
+	json "encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-	"time"
-	"sync"
 	log "log"
-	json "encoding/json"
+	"strings"
+	"sync"
+	"time"
 
 	api "github.com/enbility/eebus-go/api"
 	service "github.com/enbility/eebus-go/service"
@@ -23,8 +23,8 @@ import (
 	spine_model "github.com/enbility/spine-go/model"
 	gin "github.com/gin-gonic/gin"
 
-	"github.com/grandcat/zeroconf"
 	"github.com/gorilla/websocket"
+	"github.com/grandcat/zeroconf"
 
 	model "github.com/tumbleowlee/eebus-go-rest/server/model"
 )
@@ -326,7 +326,6 @@ func (r *Runtime) ServicePairingDetailUpdate(ski string, detail *ship_api.Connec
 		r.Hub.SendMessage(model.Message{Type: "connection_state_update", Data: device})
 	}
 
-
 }
 
 func (r *Runtime) RegisterSKI(ski string) {
@@ -347,8 +346,8 @@ func (r *Runtime) OnLPCEvent(ski string, device spine_api.DeviceRemoteInterface,
 		scenarios := r.eg_lpc.AvailableScenariosForEntity(entity)
 
 		for _, scenario := range scenarios {
-			if(scenario == 4) {
-				consumptionNominalMax, err := r.eg_lpc.ConsumptionNominalMax(entity);
+			if scenario == 4 {
+				consumptionNominalMax, err := r.eg_lpc.ConsumptionNominalMax(entity)
 				if err != nil {
 					r.Debugf("Failed to get consumption nominal max: %v", err)
 					return
@@ -478,7 +477,7 @@ func (r *Runtime) SendLPCFailsafeValue(ski string, failsafeValue float64) error 
 	if r.eg_lpc == nil {
 		return fmt.Errorf("EG LPC use case not initialized")
 	}
-	
+
 	remoteDevice := r.service.LocalDevice().RemoteDeviceForSki(ski)
 	if remoteDevice == nil {
 		return fmt.Errorf("no remote device found for SKI %s", ski)
@@ -495,7 +494,7 @@ func (r *Runtime) SendLPCFailsafeValue(ski string, failsafeValue float64) error 
 	if remoteEntity == nil {
 		return fmt.Errorf("no compatible LPC entity found on device %s", ski)
 	}
-	
+
 	_, err := r.eg_lpc.WriteFailsafeConsumptionActivePowerLimit(remoteEntity, failsafeValue)
 
 	if err != nil {
@@ -509,12 +508,12 @@ func (r *Runtime) SendLPCFailsafeDuration(ski string, failsafeDuration time.Dura
 	if r.eg_lpc == nil {
 		return fmt.Errorf("EG LPC use case not initialized")
 	}
-	
+
 	remoteDevice := r.service.LocalDevice().RemoteDeviceForSki(ski)
 	if remoteDevice == nil {
 		return fmt.Errorf("no remote device found for SKI %s", ski)
 	}
-	
+
 	// Find a compatible remote entity
 	var remoteEntity spine_api.EntityRemoteInterface
 	for _, entity := range remoteDevice.Entities() {
@@ -526,9 +525,9 @@ func (r *Runtime) SendLPCFailsafeDuration(ski string, failsafeDuration time.Dura
 	if remoteEntity == nil {
 		return fmt.Errorf("no compatible LPC entity found on device %s", ski)
 	}
-	
+
 	_, err := r.eg_lpc.WriteFailsafeDurationMinimum(remoteEntity, failsafeDuration)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to write failsafe duration minimum: %v", err)
 	}
