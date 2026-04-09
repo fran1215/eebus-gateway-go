@@ -1,4 +1,4 @@
-# eebus-go-rest (WebSocket + EEBUS Runtime)
+# eebus-gateway-go (WebSocket + EEBUS Runtime)
 
 This backend provides the EEBUS runtime for the project and exposes a WebSocket API for device discovery, simulation control, and LPC/MPC related communication.
 
@@ -11,7 +11,7 @@ The underlying module path and core structure are inherited from that original p
 
 Thank you to TumbleOwlee for the original implementation.
 
-## What eebus-go-rest does
+## What eebus-gateway-go does
 
 - Starts an EEBUS service using `enbility/eebus-go`
 - Generates a local certificate/SKI at startup (current implementation)
@@ -33,7 +33,7 @@ Thank you to TumbleOwlee for the original implementation.
 ## Project structure
 
 ```text
-eebus-go-rest/
+eebus-gateway-go/
 	README.md
 	src/
 		go.mod
@@ -65,7 +65,7 @@ go mod download
 go run ./cmd
 ```
 
-By default, eebus-go-rest listens on:
+By default, eebus-gateway-go listens on:
 
 - `http://localhost:8080`
 - WebSocket endpoint: `ws://localhost:8080/ws`
@@ -147,7 +147,7 @@ Then send:
 	- Ensure the host network allows multicast/mDNS.
 	- Ensure peer devices publish `_ship._tcp` on `local.`.
 - Frontend cannot connect:
-	- Verify eebus-go-rest is running on port `8080`.
+	- Verify eebus-gateway-go is running on port `8080`.
 	- Verify frontend origin is included in CORS `AllowOrigins`.
 - Commands fail with SKI errors:
 	- Discover devices first and confirm the SKI exists.
