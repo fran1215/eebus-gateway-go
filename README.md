@@ -5,9 +5,6 @@ This backend provides the EEBUS runtime for the project and exposes a WebSocket 
 ## Attribution
 
 This project is based on the EEBUS Go REST implementation created by **TumbleOwlee** on [eebus-go-rest](https://github.com/TumbleOwlee/eebus-go-rest).
-The underlying module path and core structure are inherited from that original project:
-
-- `github.com/tumbleowlee/eebus-go-rest`
 
 Thank you to TumbleOwlee for the original implementation.
 
