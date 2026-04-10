@@ -1,0 +1,22 @@
+version: 2
+project_name: eebus-gateway-go
+
+# before:
+#   hooks:
+#     - go mod tidy
+builds:
+  - dir: "./src"
+    main: ./cmd/main.go
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+release:
+  github:
+    owner: fran1215
+    name: eebus-gateway-go

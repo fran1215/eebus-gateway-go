@@ -31,3 +31,5 @@ go.work.sum
 # .idea/
 # .vscode/
 eebus-client
+# Added by goreleaser init:
+dist/
