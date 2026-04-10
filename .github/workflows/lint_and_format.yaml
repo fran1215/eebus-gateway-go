@@ -1,0 +1,71 @@
+name: Lint & Format
+
+on:
+  pull_request:
+    branches:
+      - main
+
+# Grant the jobs required permissions for OIDC to work
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  format:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.23
+
+      - name: Install dependencies
+        working-directory: ./src
+        run: go mod tidy
+
+      - name: Run go fmt
+        working-directory: ./src
+        run: go fmt ./...
+
+      - name: Run go vet
+        working-directory: ./src
+        run: go vet ./...
+
+      - name: Update Pull Request with formatted changes
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: format code"
+          title: "[AUTO] Format code"
+          body: "This PR automatically formats the code."
+          branch: ${{ github.head_ref }}
+          base: ${{ github.base_ref }}
+          labels: |
+            automated pr
+  golangci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Required to report new issues on the PR
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.23
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          working-directory: ./src

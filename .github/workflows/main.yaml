@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    branches: [ "main" ]
+
+# Grant the jobs required permissions for OIDC to work
+permissions:
+  id-token: write # This is required for requesting the JWT
+  contents: write # This is required for actions/checkout
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # required for go-semantic-release to analyze history
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.23
+
+      - name: Test
+        working-directory: ./src
+        run: go test -v ./...
+
+      - name: Go Semantic Release
+        id: semrel
+        uses: go-semantic-release/action@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }} # Use the default token
+
+      - name: Fetch tags created by semantic release
+        if: steps.semrel.outputs.version != null && steps.semrel.outputs.version != ''
+        run: git fetch --tags
+
+      - name: GoReleaser
+        if: steps.semrel.outputs.version != null || steps.semrel.outputs.version != ''
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --config .config/goreleaser.yaml --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
