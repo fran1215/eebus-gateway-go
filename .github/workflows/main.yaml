@@ -36,8 +36,14 @@ jobs:
         if: steps.semrel.outputs.version != null && steps.semrel.outputs.version != ''
         run: git fetch --tags
 
+      - name: Clean semantic release artifacts
+        if: steps.semrel.outputs.version != null && steps.semrel.outputs.version != ''
+        run: |
+          rm -f .generated-go-semantic-release-changelog.md
+          rm -rf .semrel
+
       - name: GoReleaser
-        if: steps.semrel.outputs.version != null || steps.semrel.outputs.version != ''
+        if: steps.semrel.outputs.version != null && steps.semrel.outputs.version != ''
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
