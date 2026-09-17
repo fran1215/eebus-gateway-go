@@ -210,6 +210,11 @@ func main() {
 						"remotes": runtime.GetRemoteSKIs(),
 					}})
 
+				case "get_lpc_states":
+					runtime.Hub.SendToClient(conn, model.Message{Type: "lpc_states", Data: gin.H{
+						"states": runtime.LPCStates(),
+					}})
+
 				case "register_ski":
 					data, _ := msg["data"].(map[string]interface{})
 					if ski, ok := data["ski"].(string); ok {
@@ -368,6 +373,7 @@ func main() {
 							runtime.Hub.SetDeviceSimulated(ski, false)
 							log.Printf("Device %s removed from simulation", ski)
 						}
+						runtime.ForgetLPCState(ski)
 						runtime.Hub.SendToClient(conn, model.Message{Type: "device_removed", Data: gin.H{"ski": ski}})
 					} else {
 						runtime.Hub.SendToClient(conn, model.Message{Type: "error", Data: gin.H{"error": "Missing SKI data"}})

@@ -63,6 +63,8 @@ type Runtime struct {
 	mpcCallback MPCEventCallback
 	lpcCallback LPCEventCallback
 
+	lpcStates *lpcStateTracker
+
 	Hub *Hub
 }
 
@@ -257,7 +259,7 @@ func NewRuntime(config Config) (*Runtime, error) {
 
 	localEntity := runtime.service.LocalDevice().EntityForType(spine_model.EntityTypeTypeCEM)
 
-	runtime.eg_lpc = usecase_eg_lpc.NewLPC(localEntity, nil)
+	runtime.eg_lpc = usecase_eg_lpc.NewLPC(localEntity, runtime.OnLPCEvent)
 	runtime.service.AddUseCase(runtime.eg_lpc)
 	runtime.ma_mpc = usecase_ma_mpc.NewMPC(localEntity, runtime.OnMPCEvent)
 	runtime.service.AddUseCase(runtime.ma_mpc)
@@ -272,6 +274,9 @@ func NewRuntime(config Config) (*Runtime, error) {
 	   	runtime.cs_lpp.SetFailsafeDurationMinimum(config.ProductionFailsafeDuration, true) */
 
 	runtime.Hub = NewHub()
+
+	runtime.lpcStates = newLPCStateTracker()
+	runtime.startLPCStateTracking()
 
 	runtime.service.Start()
 
@@ -338,6 +343,9 @@ func (r *Runtime) RegisterSKI(ski string) {
 func (r *Runtime) OnLPCEvent(ski string, device spine_api.DeviceRemoteInterface, entity spine_api.EntityRemoteInterface, event api.EventType) {
 	switch event {
 	case usecase_lpc.WriteApprovalRequired:
+		if r.cs_lpc == nil {
+			return
+		}
 		pending := r.cs_lpc.PendingConsumptionLimits()
 		for counter := range pending {
 			r.cs_lpc.ApproveOrDenyConsumptionLimit(counter, true, "")
@@ -350,12 +358,21 @@ func (r *Runtime) OnLPCEvent(ski string, device spine_api.DeviceRemoteInterface,
 				consumptionNominalMax, err := r.eg_lpc.ConsumptionNominalMax(entity)
 				if err != nil {
 					r.Debugf("Failed to get consumption nominal max: %v", err)
-					return
+					continue
 				}
 				r.consumptionNominalMax = consumptionNominalMax
 				r.Debugf("Consumption Nominal Max: %v", r.consumptionNominalMax)
 			}
 		}
+
+		r.RefreshLPCState(ski, entity)
+
+	// The CS reported a new limit, or new failsafe data. Both move it through
+	// its LPC state machine, so re-derive the state we show for it.
+	case usecase_eg_lpc.DataUpdateLimit,
+		usecase_eg_lpc.DataUpdateFailsafeConsumptionActivePowerLimit,
+		usecase_eg_lpc.DataUpdateFailsafeDurationMinimum:
+		r.RefreshLPCState(ski, entity)
 	}
 }
 
@@ -443,19 +460,7 @@ func (r *Runtime) SendLPC(ski string, consumptionNominalMax float64, isActive bo
 		return fmt.Errorf("EG LPC use case not initialized")
 	}
 
-	remoteDevice := r.service.LocalDevice().RemoteDeviceForSki(ski)
-	if remoteDevice == nil {
-		return fmt.Errorf("no remote device found for SKI %s", ski)
-	}
-
-	// Find a compatible remote entity
-	var remoteEntity spine_api.EntityRemoteInterface
-	for _, entity := range remoteDevice.Entities() {
-		if r.eg_lpc.IsCompatibleEntityType(entity) {
-			remoteEntity = entity
-			break
-		}
-	}
+	remoteEntity := r.remoteLPCEntity(ski)
 	if remoteEntity == nil {
 		return fmt.Errorf("no compatible LPC entity found on device %s", ski)
 	}
@@ -470,7 +475,15 @@ func (r *Runtime) SendLPC(ski string, consumptionNominalMax float64, isActive bo
 		IsChangeable: true,
 		IsActive:     isActive,
 	}, nil)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Nothing on the wire reports that the CS has left its init state, so
+	// record the handover that ends it.
+	r.MarkLPCLimitWritten(ski)
+
+	return nil
 }
 
 func (r *Runtime) SendLPCFailsafeValue(ski string, failsafeValue float64) error {
@@ -478,19 +491,7 @@ func (r *Runtime) SendLPCFailsafeValue(ski string, failsafeValue float64) error 
 		return fmt.Errorf("EG LPC use case not initialized")
 	}
 
-	remoteDevice := r.service.LocalDevice().RemoteDeviceForSki(ski)
-	if remoteDevice == nil {
-		return fmt.Errorf("no remote device found for SKI %s", ski)
-	}
-
-	// Find a compatible remote entity
-	var remoteEntity spine_api.EntityRemoteInterface
-	for _, entity := range remoteDevice.Entities() {
-		if r.eg_lpc.IsCompatibleEntityType(entity) {
-			remoteEntity = entity
-			break
-		}
-	}
+	remoteEntity := r.remoteLPCEntity(ski)
 	if remoteEntity == nil {
 		return fmt.Errorf("no compatible LPC entity found on device %s", ski)
 	}
@@ -509,19 +510,7 @@ func (r *Runtime) SendLPCFailsafeDuration(ski string, failsafeDuration time.Dura
 		return fmt.Errorf("EG LPC use case not initialized")
 	}
 
-	remoteDevice := r.service.LocalDevice().RemoteDeviceForSki(ski)
-	if remoteDevice == nil {
-		return fmt.Errorf("no remote device found for SKI %s", ski)
-	}
-
-	// Find a compatible remote entity
-	var remoteEntity spine_api.EntityRemoteInterface
-	for _, entity := range remoteDevice.Entities() {
-		if r.eg_lpc.IsCompatibleEntityType(entity) {
-			remoteEntity = entity
-			break
-		}
-	}
+	remoteEntity := r.remoteLPCEntity(ski)
 	if remoteEntity == nil {
 		return fmt.Errorf("no compatible LPC entity found on device %s", ski)
 	}
@@ -655,10 +644,12 @@ func (r *Runtime) MDNSDiscovery(timeout time.Duration) ([]model.Device, error) {
 
 func (r *Runtime) RemoteSKIConnected(service api.ServiceInterface, ski string) {
 	r.Infof("Remote SKI connected: %s", ski)
+	r.SetLPCConnected(ski, true)
 }
 
 func (r *Runtime) RemoteSKIDisconnected(service api.ServiceInterface, ski string) {
 	r.Infof("Remote SKI disconnected: %s", ski)
+	r.SetLPCConnected(ski, false)
 }
 
 func (r *Runtime) ServiceShipIDUpdate(ski string, shipID string) {
