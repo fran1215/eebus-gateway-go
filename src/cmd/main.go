@@ -2,12 +2,20 @@ package main
 
 import (
 	context "context"
+	ecdsa "crypto/ecdsa"
+	sha256 "crypto/sha256"
+	tls "crypto/tls"
+	x509 "crypto/x509"
 	json "encoding/json"
+	pem "encoding/pem"
+	"errors"
 	"fmt"
+	fs "io/fs"
 	log "log"
 	http "net/http"
 	os "os"
 	signal "os/signal"
+	filepath "path/filepath"
 	strconv "strconv"
 	syscall "syscall"
 	time "time"
@@ -19,8 +27,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/tumbleowlee/eebus-go-rest/server/eebus"
 	model "github.com/tumbleowlee/eebus-go-rest/server/model"
-
-	rand "math/rand/v2"
 )
 
 var upgrader = websocket.Upgrader{
@@ -43,20 +49,123 @@ func waitForSignal(srv *http.Server) {
 	log.Println("Server exiting")
 }
 
+// Where this service keeps its identity. A remote device trusts this CEM by the
+// SKI derived from the certificate below, so the certificate has to survive a
+// restart: generating a fresh one makes every already-paired device reject the
+// connection, which surfaces as a closed SHIP connection and devices that can
+// no longer be added.
+const (
+	certDirEnv     = "EEBUS_CERT_DIR"
+	defaultCertDir = "cert"
+	certFileName   = "eebus.crt"
+	keyFileName    = "eebus.key"
+)
+
+func certificateDir() string {
+	if dir := os.Getenv(certDirEnv); dir != "" {
+		return dir
+	}
+	return defaultCertDir
+}
+
+// loadOrCreateCertificate returns this service's long-lived certificate,
+// generating and storing one the first time it runs.
+func loadOrCreateCertificate(dir string) (tls.Certificate, error) {
+	certPath := filepath.Join(dir, certFileName)
+	keyPath := filepath.Join(dir, keyFileName)
+
+	certificate, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err == nil {
+		log.Printf("Loaded existing certificate from %s", dir)
+		return certificate, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		log.Printf("Could not load certificate from %s (%v), generating a new one", dir, err)
+	}
+
+	certificate, err = cert.CreateCertificate("OrganizationUnit", "Organization", "Country", "CommonName")
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	if err := saveCertificate(certificate, certPath, keyPath); err != nil {
+		// Usable for this run, but the identity will not be the same next time,
+		// which means re-pairing every device.
+		log.Printf("WARNING: could not store certificate (%v); the SKI will change on restart", err)
+	} else {
+		log.Printf("Generated a new certificate in %s", dir)
+	}
+
+	return certificate, nil
+}
+
+func saveCertificate(certificate tls.Certificate, certPath, keyPath string) error {
+	if err := os.MkdirAll(filepath.Dir(certPath), 0o755); err != nil {
+		return fmt.Errorf("failed to create certificate directory: %w", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Certificate[0]})
+	if certPEM == nil {
+		return errors.New("failed to encode certificate")
+	}
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		return fmt.Errorf("failed to write certificate: %w", err)
+	}
+
+	privateKey, ok := certificate.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return fmt.Errorf("unexpected private key type %T", certificate.PrivateKey)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		return fmt.Errorf("failed to marshal private key: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if keyPEM == nil {
+		return errors.New("failed to encode private key")
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		return fmt.Errorf("failed to write private key: %w", err)
+	}
+
+	return nil
+}
+
+// deviceIdentifier derives the numeric suffix used in the serial number and the
+// alternative identifier from the SKI. Both are part of how a remote device
+// recognises this service, so drawing them at random each start would undo the
+// stable certificate above.
+func deviceIdentifier(ski string) string {
+	digest := sha256.Sum256([]byte(ski))
+
+	id := make([]byte, 0, 11)
+	id = append(id, '0')
+	for i := 0; i < 10; i++ {
+		id = append(id, '0'+digest[i]%10)
+	}
+	return string(id)
+}
+
 func main() {
-	// For now we recreate a new certificate (and ski) on each start
-	// We have to alternatively load it from disk to keep the same SKI
-	certificate, err := cert.CreateCertificate("OrganizationUnit", "Organization", "Country", "CommonName")
+	certificate, err := loadOrCreateCertificate(certificateDir())
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
-	idNum := "0"
-
-	for i := 0; i < 10; i++ {
-		idNum += strconv.Itoa(rand.IntN(10))
+	// The serial number and alternative identifier are derived from the SKI so
+	// that this service presents the same identity on every start.
+	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil {
+		log.Println(err)
+		return
 	}
+	localSki, err := cert.SkiFromCertificate(leaf)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	idNum := deviceIdentifier(localSki)
 
 	config := eebus.Config{
 		VendorCode:                    "vendorCode",
@@ -356,6 +465,7 @@ func main() {
 					data, _ := msg["data"].(map[string]interface{})
 
 					if ski, ok := data["ski"].(string); ok {
+						runtime.RegisterSKI(ski)
 						if runtime.Hub.SimulationRunning {
 							runtime.Hub.SetDeviceSimulated(ski, true)
 							log.Printf("Device %s added to running simulation", ski)
@@ -373,6 +483,7 @@ func main() {
 							runtime.Hub.SetDeviceSimulated(ski, false)
 							log.Printf("Device %s removed from simulation", ski)
 						}
+						runtime.UnregisterSKI(ski)
 						runtime.ForgetLPCState(ski)
 						runtime.Hub.SendToClient(conn, model.Message{Type: "device_removed", Data: gin.H{"ski": ski}})
 					} else {

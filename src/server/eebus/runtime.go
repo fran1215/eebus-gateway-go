@@ -65,6 +65,8 @@ type Runtime struct {
 
 	lpcStates *lpcStateTracker
 
+	remoteSkiMu sync.Mutex
+
 	Hub *Hub
 }
 
@@ -333,11 +335,52 @@ func (r *Runtime) ServicePairingDetailUpdate(ski string, detail *ship_api.Connec
 
 }
 
+// RegisterSKI trusts a remote device and lets SHIP connect to it. Registering
+// the same SKI twice would leave a duplicate behind that a later unregister
+// could not fully remove, so repeat calls are ignored.
 func (r *Runtime) RegisterSKI(ski string) {
-	r.Infof("Registering remote SKI: %s", ski)
+	if ski == "" || ski == r.local_ski {
+		return
+	}
+
+	r.remoteSkiMu.Lock()
+	for _, known := range r.remote_ski {
+		if known == ski {
+			r.remoteSkiMu.Unlock()
+			return
+		}
+	}
 	r.remote_ski = append(r.remote_ski, ski)
+	registered := append([]string(nil), r.remote_ski...)
+	r.remoteSkiMu.Unlock()
+
+	r.Infof("Registering remote SKI: %s", ski)
 	r.service.RegisterRemoteSKI(ski)
-	r.Infof("Remote SKIs registered: %v", r.remote_ski)
+	r.Infof("Remote SKIs registered: %v", registered)
+}
+
+// UnregisterSKI drops one device's registration, which closes its SHIP
+// connection. Only for a device actually being taken off the grid.
+func (r *Runtime) UnregisterSKI(ski string) {
+	r.remoteSkiMu.Lock()
+	remaining := make([]string, 0, len(r.remote_ski))
+	found := false
+	for _, known := range r.remote_ski {
+		if known == ski {
+			found = true
+			continue
+		}
+		remaining = append(remaining, known)
+	}
+	if !found {
+		r.remoteSkiMu.Unlock()
+		return
+	}
+	r.remote_ski = remaining
+	r.remoteSkiMu.Unlock()
+
+	r.Infof("Unregistering remote SKI: %s", ski)
+	r.service.UnregisterRemoteSKI(ski)
 }
 
 func (r *Runtime) OnLPCEvent(ski string, device spine_api.DeviceRemoteInterface, entity spine_api.EntityRemoteInterface, event api.EventType) {
@@ -438,7 +481,10 @@ func (r *Runtime) OnMPCEvent(ski string, device spine_api.DeviceRemoteInterface,
 		for _, volt := range voltage {
 			totalVoltage += volt
 		}
-		var avgVoltage float64 = totalVoltage / float64(len(voltage))
+		var avgVoltage float64
+		if len(voltage) > 0 {
+			avgVoltage = totalVoltage / float64(len(voltage))
+		}
 
 		fmt.Printf("DEBUG - Calling MPC callback with: Power=%.2f, Energy=%.2f, Current=%.2f, Voltage=%.2f, Frequency=%.2f \n", power, energy, totalCurrent, avgVoltage, frequency)
 		r.mpcCallback(ski, power, energy, totalCurrent, avgVoltage, frequency)
@@ -534,11 +580,11 @@ func (r *Runtime) StartSimulation(skis []string) error {
 	return nil
 }
 
+// StopSimulation only stops the simulated readings. It used to unregister every
+// remote SKI, which closed the SHIP connection to every real device on the grid
+// and left them unreachable until the simulation was started again. Registration
+// follows the devices on the grid instead, via add_device / remove_device.
 func (r *Runtime) StopSimulation() error {
-	for _, ski := range r.remote_ski {
-		r.service.UnregisterRemoteSKI(ski)
-	}
-	r.remote_ski = []string{}
 	return nil
 }
 

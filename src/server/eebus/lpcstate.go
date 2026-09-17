@@ -22,16 +22,14 @@ import (
 type LPCState string
 
 const (
-	// Reachable but not yet under our control: no limit has been handed to it,
-	// so it still applies its failsafe limit. Nothing on the wire reports the
-	// CS init state, so this is inferred from whether we have limited it yet.
-	LPCStateInit LPCState = "init"
+	// Not under our control, and the use case gives the Energy Guard no way to
+	// tell which of the two it is: a CS that has not yet been limited looks
+	// exactly like one that has outlasted its failsafe window and gone
+	// autonomous. Reported as the one state rather than guessing between them.
+	LPCStateInitOrAutonomous LPCState = "init_or_autonomous"
 
 	// Reachable, no limit active: the CS consumes freely but under our control.
 	LPCStateUnlimitedControlled LPCState = "unlimited_controlled"
-
-	// Unreachable past the minimum failsafe duration: the CS is on its own.
-	LPCStateUnlimitedAutonomous LPCState = "unlimited_autonomous"
 
 	// An active limit that expires by itself once its duration runs out.
 	LPCStateLimitedWithDuration LPCState = "limited_with_duration"
@@ -94,7 +92,7 @@ func newLPCStateTracker() *lpcStateTracker {
 func (t *lpcStateTracker) device(ski string) *lpcDevice {
 	d, ok := t.devices[ski]
 	if !ok {
-		d = &lpcDevice{published: LPCStateInit}
+		d = &lpcDevice{published: LPCStateInitOrAutonomous}
 		t.devices[ski] = d
 	}
 	return d
@@ -120,14 +118,13 @@ func (d *lpcDevice) failsafeWindow() time.Duration {
 // state derives the CS state machine position from the observed data.
 func (d *lpcDevice) state(now time.Time) LPCState {
 	if !d.connected {
-		// Never seen on the network: the CS is starting up, not lost.
-		if d.disconnectedAt.IsZero() {
-			return LPCStateInit
-		}
-		if now.Sub(d.disconnectedAt) < d.failsafeWindow() {
+		// Out of contact, but only within the failsafe window can we say the CS
+		// is holding its failsafe limit. Before it (never seen) and after it
+		// (gone autonomous) are indistinguishable from here.
+		if !d.disconnectedAt.IsZero() && now.Sub(d.disconnectedAt) < d.failsafeWindow() {
 			return LPCStateFailsafe
 		}
-		return LPCStateUnlimitedAutonomous
+		return LPCStateInitOrAutonomous
 	}
 
 	// A limit in force is the clearest signal there is, whoever set it, so it
@@ -140,10 +137,9 @@ func (d *lpcDevice) state(now time.Time) LPCState {
 	}
 
 	// Reachable and unlimited. Until we have handed it a limit we have not
-	// taken control, which is the closest the Energy Guard side can get to
-	// observing the CS init state.
+	// taken control, so it is still either in init or acting on its own.
 	if !d.wroteLimit {
-		return LPCStateInit
+		return LPCStateInitOrAutonomous
 	}
 
 	return LPCStateUnlimitedControlled

@@ -33,3 +33,6 @@ go.work.sum
 eebus-client
 # Added by goreleaser init:
 dist/
+
+# EEBUS service identity (certificate + private key)
+cert/
